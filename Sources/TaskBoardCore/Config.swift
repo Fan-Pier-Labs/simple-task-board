@@ -45,6 +45,12 @@ public struct BoardConfig: Codable, Equatable, Sendable {
     /// Seconds between GitHub and Jira refreshes.
     public var pollSeconds: Int
     public var githubEnabled: Bool
+    /// Serve the HTTP API on this machine, so agents and scripts can update the board.
+    public var apiEnabled: Bool
+    public var apiPort: Int
+    /// Mark the web links the app opens, so the browser extension can switch to a tab that
+    /// already shows the page. Off unless the extension is installed.
+    public var reuseBrowserTabs: Bool
     /// The GitHub server, for GitHub Enterprise: e.g. `github.example.com`. `nil` means github.com.
     public var githubHost: String?
     /// e.g. `https://example.atlassian.net`
@@ -65,6 +71,9 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         layout: .board,
         pollSeconds: 60,
         githubEnabled: true,
+        apiEnabled: true,
+        apiPort: 47821,
+        reuseBrowserTabs: false,
         githubHost: nil,
         jiraBaseURL: nil,
         jiraEmail: nil
@@ -78,6 +87,9 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         layout: BoardLayout,
         pollSeconds: Int,
         githubEnabled: Bool,
+        apiEnabled: Bool,
+        apiPort: Int,
+        reuseBrowserTabs: Bool,
         githubHost: String?,
         jiraBaseURL: String?,
         jiraEmail: String?
@@ -89,6 +101,9 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         self.layout = layout
         self.pollSeconds = pollSeconds
         self.githubEnabled = githubEnabled
+        self.apiEnabled = apiEnabled
+        self.apiPort = apiPort
+        self.reuseBrowserTabs = reuseBrowserTabs
         self.githubHost = githubHost
         self.jiraBaseURL = jiraBaseURL
         self.jiraEmail = jiraEmail
@@ -106,6 +121,10 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         layout = try container.decodeIfPresent(BoardLayout.self, forKey: .layout) ?? fallback.layout
         pollSeconds = max(15, try container.decodeIfPresent(Int.self, forKey: .pollSeconds) ?? fallback.pollSeconds)
         githubEnabled = try container.decodeIfPresent(Bool.self, forKey: .githubEnabled) ?? fallback.githubEnabled
+        apiEnabled = try container.decodeIfPresent(Bool.self, forKey: .apiEnabled) ?? fallback.apiEnabled
+        let port = try container.decodeIfPresent(Int.self, forKey: .apiPort) ?? fallback.apiPort
+        apiPort = (1024...65535).contains(port) ? port : fallback.apiPort
+        reuseBrowserTabs = try container.decodeIfPresent(Bool.self, forKey: .reuseBrowserTabs) ?? fallback.reuseBrowserTabs
         githubHost = try container.decodeIfPresent(String.self, forKey: .githubHost)
         jiraBaseURL = try container.decodeIfPresent(String.self, forKey: .jiraBaseURL)
         jiraEmail = try container.decodeIfPresent(String.self, forKey: .jiraEmail)
@@ -147,6 +166,9 @@ public struct BoardConfig: Codable, Equatable, Sendable {
     /// The host `gh` should talk to: the configured server, or github.com.
     public var githubHostName: String { GitHub.normalizeHost(githubHost) }
 
+    /// Where the HTTP API is served when it is on.
+    public var apiBaseURL: String { "http://127.0.0.1:\(apiPort)" }
+
     public var jiraBrowseBase: URL? {
         guard let raw = jiraBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
         let trimmed = raw.hasSuffix("/") ? String(raw.dropLast()) : raw
@@ -175,6 +197,23 @@ public enum BoardPaths {
             return URL(fileURLWithPath: (custom as NSString).expandingTildeInPath, isDirectory: true)
         }
         return home.appendingPathComponent("tasks", isDirectory: true)
+    }
+}
+
+/// The marker that tells the browser extension a link came from Task Board.
+public enum BrowserTabReuse {
+    /// Must match `MARKER` in `extension/background.js`.
+    public static let marker = "taskboard-reuse"
+
+    /// Adds the marker to a web link. A link that already has a fragment of its own, or is not
+    /// a web link, is returned unchanged.
+    public static func marked(_ url: URL) -> URL {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              (components.fragment ?? "").isEmpty
+        else { return url }
+        components.fragment = marker
+        return components.url ?? url
     }
 }
 

@@ -17,6 +17,9 @@ final class BoardModel: ObservableObject {
     /// Problems worth showing in the header, e.g. a missing `gh`.
     @Published private(set) var syncNotes: [String] = []
 
+    /// Whether the HTTP API is being served, for Settings to show.
+    @Published private(set) var apiState: LocalAPIServer.State = .stopped
+
     @Published var expandedSubtasks: Set<String> = []
     @Published var expandedDetails: Set<String> = []
     /// Keeps the board open when you click elsewhere.
@@ -25,6 +28,8 @@ final class BoardModel: ObservableObject {
     private var tasks: [TaskItem] = []
     private var watcher: FileWatcher?
     private var configWatcher: FileWatcher?
+    private var apiServer: LocalAPIServer?
+    private var apiGeneration = 0
     private var timer: Timer?
     private var remoteKeys = Set<String>()
 
@@ -44,6 +49,8 @@ final class BoardModel: ObservableObject {
     /// and the app that takes the link comes to the front.
     func open(_ url: URL) {
         if !pinned { closeBoard() }
+        // The app that takes the link is looked up for the plain address; the browser gets the marked one.
+        let destination = config.reuseBrowserTabs ? BrowserTabReuse.marked(url) : url
 
         // Hand focus over while this app still has it to give. Without this, an app that is
         // already running can take the link and stay behind whatever was in front.
@@ -56,7 +63,7 @@ final class BoardModel: ObservableObject {
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        NSWorkspace.shared.open(url, configuration: configuration) { application, _ in
+        NSWorkspace.shared.open(destination, configuration: configuration) { application, _ in
             guard let processID = application?.processIdentifier ?? runningID else { return }
             DispatchQueue.main.async {
                 NSRunningApplication(processIdentifier: processID)?.activate(options: [.activateAllWindows])
@@ -77,6 +84,7 @@ final class BoardModel: ObservableObject {
         reload()
         restartWatcher()
         restartTimer()
+        restartAPI()
         Task { await syncRemote() }
 
         // Settings changed from outside the app (`taskboard config …`) take effect straight away.
@@ -100,6 +108,37 @@ final class BoardModel: ObservableObject {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(config.pollSeconds), repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.syncRemote() }
+        }
+    }
+
+    /// Starts, restarts or stops the HTTP API to match the settings.
+    private func restartAPI() {
+        apiServer?.stop()
+        apiServer = nil
+        apiGeneration += 1
+        let generation = apiGeneration
+        guard config.apiEnabled else {
+            apiState = .stopped
+            return
+        }
+        do {
+            let api = BoardAPI(
+                store: TaskStore(directory: tasksDirectory),
+                token: try APIToken.loadOrCreate(),
+                // Read from disk per request: the API runs off the main thread, and this is always current.
+                config: { BoardConfig.loadIfValid() ?? .default }
+            )
+            let server = try LocalAPIServer(port: config.apiPort, handler: { api.respond(to: $0) }, onState: { [weak self] state in
+                Task { @MainActor in
+                    // A server that was replaced reports "stopped" late; that is not news about the new one.
+                    guard let self, self.apiGeneration == generation else { return }
+                    self.apiState = state
+                }
+            })
+            server.start()
+            apiServer = server
+        } catch {
+            apiState = .failed("\(error)")
         }
     }
 
@@ -170,6 +209,7 @@ final class BoardModel: ObservableObject {
             || updated.githubHost != config.githubHost
             || updated.jiraBaseURL != config.jiraBaseURL
             || updated.jiraEmail != config.jiraEmail
+        let apiChanged = updated.apiEnabled != config.apiEnabled || updated.apiPort != config.apiPort
         config = updated
 
         if connectionsChanged, timer != nil {
@@ -183,6 +223,7 @@ final class BoardModel: ObservableObject {
             rebuild()
         }
         if pollChanged, timer != nil { restartTimer() }
+        if apiChanged || directoryChanged, timer != nil { restartAPI() }
     }
 
     var preferredSize: CGSize {

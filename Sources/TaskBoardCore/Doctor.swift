@@ -39,7 +39,7 @@ public struct Doctor: Sendable {
 
     public func run() async -> [DoctorCheck] {
         let tasks = store.loadAll()
-        return taskChecks(tasks) + agentChecks(tasks) + githubChecks(tasks) + (await jiraChecks(tasks))
+        return taskChecks(tasks) + agentChecks(tasks) + (await apiChecks()) + githubChecks(tasks) + (await jiraChecks(tasks))
     }
 
     private func display(_ url: URL) -> String {
@@ -96,6 +96,27 @@ public struct Doctor: Sendable {
             ))
         }
         return checks
+    }
+
+    // MARK: - API
+
+    func apiChecks() async -> [DoctorCheck] {
+        let area = "API"
+        guard config.apiEnabled else {
+            return [DoctorCheck(area, .warning, "The HTTP API is switched off in Settings.")]
+        }
+        guard APIToken.read() != nil else {
+            return [DoctorCheck(area, .failure, "There is no API token yet.", fix: "Launch Task Board once; it creates the token.")]
+        }
+        var request = URLRequest(url: URL(string: config.apiBaseURL + "/v1/health")!)
+        request.timeoutInterval = 3
+        if let (_, response) = try? await URLSession.shared.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200 {
+            return [DoctorCheck(area, .pass, "Answering on \(config.apiBaseURL).")]
+        }
+        return [DoctorCheck(
+            area, .failure, "Nothing is answering on \(config.apiBaseURL).",
+            fix: "Check that Task Board is running. If another program uses that port, change it: `taskboard config api-port <number>`."
+        )]
     }
 
     // MARK: - GitHub

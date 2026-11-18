@@ -16,6 +16,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN/TaskBoardApp" "$APP/Contents/MacOS/TaskBoardApp"
 cp "$BIN/taskboard" "$APP/Contents/MacOS/taskboard"
+# The browser extension travels with the app, so Settings can point at it.
+mkdir -p "$APP/Contents/Resources"
+cp -R extension "$APP/Contents/Resources/extension"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

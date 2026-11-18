@@ -20,7 +20,9 @@ USAGE
 
   taskboard doctor                        Test the Cursor, GitHub and Jira connections
   taskboard config                        Show the connection settings
-  taskboard config <setting> <value>      Change one: agent, github-server, jira-site, jira-email
+  taskboard config <setting> <value>      Change one: agent, github-server, jira-site, jira-email,
+                                          api (on|off), api-port, reuse-tabs (on|off)
+  taskboard api                           Show how to reach the HTTP API, and whether it is answering
 
   taskboard install-cursor-hooks          Add the hooks to ~/.cursor/hooks.json
   taskboard install-claude-hooks          Add the hooks to ~/.claude/settings.json
@@ -101,34 +103,12 @@ let store = TaskStore(config: config)
 /// and failing that, the app chosen in Settings.
 let linker = SessionLinker(store: store, defaultKind: AgentKind.detect() ?? config.agent)
 
-func validatedTitle(_ raw: String) throws -> String {
-    let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !title.isEmpty else { throw Failure("A title cannot be empty.") }
-    guard title.count <= TaskItem.maxTitleLength else {
-        throw Failure("Titles are at most \(TaskItem.maxTitleLength) characters; this one is \(title.count). Shorten it.")
+func parseSwitch(_ raw: String) throws -> Bool {
+    switch raw.lowercased() {
+    case "on", "true", "yes": return true
+    case "off", "false", "no": return false
+    default: throw Failure("Use on or off.")
     }
-    return title
-}
-
-func parseStatus(_ raw: String) throws -> TaskStatus {
-    guard let status = TaskStatus(lenient: raw) else {
-        throw Failure("Unknown status '\(raw)'. Use idle, working, needs-attention or done.")
-    }
-    return status
-}
-
-func resolveColumn(_ raw: String) throws -> String? {
-    if raw.lowercased() == "auto" { return nil }
-    guard let column = config.column(id: raw) else {
-        let names = config.columns.map(\.name).joined(separator: ", ")
-        throw Failure("No column named '\(raw)'. Columns: \(names).")
-    }
-    return column.id
-}
-
-func requireParent(_ id: String) throws -> String {
-    guard store.task(id: id) != nil else { throw Failure("No task with id '\(id)' to use as the parent.") }
-    return id
 }
 
 /// "none" clears a link.
@@ -148,28 +128,17 @@ func targetTask(id: String?, session: String?) throws -> TaskItem {
     return task
 }
 
+/// Turns `--field value` options into changes and applies them. The rules live in `TaskEdit`,
+/// which the HTTP API uses too.
 func applyOptions(_ arguments: Arguments, to task: inout TaskItem) throws {
-    if let title = arguments.options["title"] { task.title = try validatedTitle(title) }
-    if let parent = arguments.options["parent"] {
-        task.parent = try optionalLink(parent).map(requireParent)
-        if task.parent == task.id { throw Failure("A task cannot be its own parent.") }
+    /// Fields where the word "none" on the command line means "clear this".
+    let clearable: Set<String> = ["parent", "column", "reason", "jira", "pr", "workspace", "branch"]
+    var changes: [String: String?] = [:]
+    for field in TaskEdit.fields {
+        guard let raw = arguments.options[field] else { continue }
+        changes[field] = clearable.contains(field) ? optionalLink(raw) : raw
     }
-    if let column = arguments.options["column"] { task.column = try resolveColumn(column) }
-    if let status = arguments.options["status"] {
-        task.status = try parseStatus(status)
-        if task.status != .needsAttention { task.attention = nil }
-    }
-    if let reason = arguments.options["reason"] { task.attention = optionalLink(reason) }
-    if let jira = arguments.options["jira"] { task.jira = optionalLink(jira)?.uppercased() }
-    if let pr = arguments.options["pr"] { task.pr = optionalLink(pr) }
-    if let workspace = arguments.options["workspace"] {
-        task.workspace = optionalLink(workspace).map { ($0 as NSString).expandingTildeInPath }
-    }
-    if let branch = arguments.options["branch"] { task.branch = optionalLink(branch) }
-    if let body = arguments.options["body"] { task.body = body }
-    if let note = arguments.options["note"] {
-        task.body = task.body.isEmpty ? note : task.body + "\n\n" + note
-    }
+    try TaskEdit.apply(changes, to: &task, config: config, store: store)
 }
 
 /// Runs async work from this synchronous tool and waits for it.
@@ -196,6 +165,8 @@ func printConfig() {
     print("jira-site:      \(config.jiraBaseURL ?? "(not set)")")
     print("jira-email:     \(config.jiraEmail ?? "(not set)")")
     print("jira token:     \(JiraCredentials.hasStoredToken ? "saved in the Keychain" : "not saved")")
+    print("api:            \(config.apiEnabled ? "on, \(config.apiBaseURL)" : "off")")
+    print("reuse-tabs:     \(config.reuseBrowserTabs ? "on" : "off")")
 }
 
 func describe(_ task: TaskItem) -> String {
@@ -267,7 +238,7 @@ func run(_ rawArguments: [String]) throws {
     case "add":
         let rawTitle = arguments.positionals.first ?? arguments.options["title"]
         guard let rawTitle else { throw Failure("Usage: taskboard add <title> [options]") }
-        var draft = TaskItem(id: "", title: try validatedTitle(rawTitle))
+        var draft = TaskItem(id: "", title: try TaskEdit.validatedTitle(rawTitle))
         try applyOptions(arguments, to: &draft)
         let created = try linker.add(draft, session: arguments.session)
         print("Created \(created.id)")
@@ -302,7 +273,7 @@ func run(_ rawArguments: [String]) throws {
             throw Failure("Usage: taskboard status [<id>] <idle|working|needs-attention|done> [--reason <text>]")
         }
         var task = try targetTask(id: positionals.count == 2 ? positionals[0] : nil, session: arguments.currentSession)
-        task.status = try parseStatus(rawStatus)
+        task.status = try TaskEdit.status(rawStatus)
         task.awaitingApproval = false
         task.attention = task.status == .needsAttention ? arguments.options["reason"] : nil
         try store.save(task)
@@ -359,11 +330,42 @@ func run(_ rawArguments: [String]) throws {
             updated.jiraBaseURL = value
         case "jira-email":
             updated.jiraEmail = value
+        case "api":
+            updated.apiEnabled = try parseSwitch(positionals[1])
+        case "api-port":
+            guard let port = Int(positionals[1]), (1024...65535).contains(port) else {
+                throw Failure("The port is a number from 1024 to 65535.")
+            }
+            updated.apiPort = port
+        case "reuse-tabs":
+            updated.reuseBrowserTabs = try parseSwitch(positionals[1])
         default:
-            throw Failure("Unknown setting '\(positionals[0])'. Use agent, github-server, jira-site or jira-email.")
+            throw Failure("Unknown setting '\(positionals[0])'. Use agent, github-server, jira-site, jira-email, api, api-port or reuse-tabs.")
         }
         try updated.save()
         print("Saved \(positionals[0]). Task Board picks it up on its own.")
+
+    case "api":
+        let tokenPath = (APIToken.file.path as NSString).abbreviatingWithTildeInPath
+        let base = config.apiBaseURL
+        print("Address:  \(base)")
+        print("Token:    \(tokenPath)\(APIToken.read() == nil ? "  (not created yet: launch Task Board once)" : "")")
+        if config.apiEnabled {
+            let answering = blocking { () async -> Bool in
+                var request = URLRequest(url: URL(string: base + "/v1/health")!)
+                request.timeoutInterval = 3
+                guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+                return (response as? HTTPURLResponse)?.statusCode == 200
+            }
+            print("Status:   \(answering ? "answering" : "not answering. Is Task Board running?")")
+        } else {
+            print("Status:   switched off. Turn it on with `taskboard config api on`.")
+        }
+        print("")
+        print("List the tasks:")
+        print("  curl -s -H \"Authorization: Bearer $(cat \(tokenPath))\" \(base)/v1/tasks")
+        print("Create one:")
+        print("  curl -s -X POST -H \"Authorization: Bearer $(cat \(tokenPath))\" -d '{\"title\": \"Try the API\"}' \(base)/v1/tasks")
 
     case "hook":
         // `taskboard hook` with no app named is what the first Cursor hooks called.

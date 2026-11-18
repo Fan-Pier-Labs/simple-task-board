@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Task Board tab reuse",
+  "version": "0.1.0",
+  "description": "When Task Board opens a link that is already open in a tab, switches to that tab instead of keeping a second copy.",
+  "permissions": ["tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "121"
+}

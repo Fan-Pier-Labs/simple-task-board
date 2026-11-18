@@ -23,7 +23,9 @@ on its own.
 - **Agent button**: opens the chat working on that task, in Cursor or in Claude. It shows that
   app's icon. Clicking it, or any other link on a card, closes the board and brings that app to
   the front. Pin the board to keep it open instead.
-- **GitHub button**: opens the pull request. Its dot is green, yellow or red for CI, purple once merged.
+- **GitHub button**: opens the pull request. Its dot is green, yellow or red for CI, purple once
+  merged. With the [browser extension](#browser-extension), it switches to the tab that already has
+  the pull request open instead of opening another.
 - **Jira badge**: the issue key and its Jira status. Click it to open the issue.
 - **Click a title** to open the task: why it needs attention, the full markdown description, and
   its links.
@@ -129,9 +131,21 @@ GitHub
 `github-server <host>`, `jira-site <url>` and `jira-email <email>` change them. The running app
 picks changes up at once.
 
+## HTTP API
+
+The running app also serves a small HTTP API on this machine, for scripts and tools that cannot run
+the command. It does the same things under the same rules:
+
+```bash
+curl -s -H "Authorization: Bearer $(cat ~/.taskboard/api-token)" http://127.0.0.1:47821/v1/tasks
+```
+
+It answers only on this machine and only to callers that send the token. [docs/api.md](docs/api.md)
+lists every call. Turn it off, or change the port, under Settings → Agents → API.
+
 ## Cursor and Claude
 
-Pick the app your agents run in under Settings → Integrations → **Agents run in**, then click
+Pick the app your agents run in under Settings → Agents → **Agents run in**, then click
 **Install** below it. From a terminal, that is `taskboard config agent claude` (or `cursor`) and
 `taskboard install-claude-hooks` (or `install-cursor-hooks`).
 
@@ -185,6 +199,20 @@ For GitHub Enterprise, sign the CLI in to your server with
 `gh auth login --hostname github.example.com`, and enter the server under Settings → Integrations →
 GitHub. **Test Connection** there shows which account the CLI is using on it. Pull requests on
 different servers can sit on the same board; each is read from the server in its URL.
+
+## Browser extension
+
+A browser always opens a link from another app in a new tab. The extension in
+[`extension/`](extension) changes that for links opened from the board: if a tab already shows that
+pull request or Jira issue, the browser switches to it and no second tab is left open.
+
+1. In Chrome (or Edge, Brave, Arc), open `chrome://extensions`, turn on **Developer mode**, click
+   **Load unpacked** and choose the extension folder. The built app carries a copy: Settings →
+   Integrations → Browser → **Show Extension Folder**.
+2. Turn on Settings → Integrations → Browser → **Switch to a tab that is already open**.
+
+The app then adds `#taskboard-reuse` to the web links it opens, and the extension acts only on tabs
+that arrive with that marker. It uses no AppleScript and needs no system permission.
 
 ## Jira
 

@@ -4,7 +4,7 @@ import SwiftUI
 import TaskBoardCore
 
 enum SettingsTab: String, CaseIterable {
-    case general, columns, integrations
+    case general, columns, agents, integrations
 }
 
 struct SettingsView: View {
@@ -19,11 +19,14 @@ struct SettingsView: View {
             ColumnSettings(model: model)
                 .tabItem { Label("Columns", systemImage: "rectangle.split.3x1") }
                 .tag(SettingsTab.columns)
+            AgentSettings(model: model)
+                .tabItem { Label("Agents", systemImage: "person.2") }
+                .tag(SettingsTab.agents)
             IntegrationSettings(model: model)
                 .tabItem { Label("Integrations", systemImage: "link") }
                 .tag(SettingsTab.integrations)
         }
-        .frame(width: 540, height: 640)
+        .frame(width: 540, height: 660)
     }
 }
 
@@ -204,19 +207,15 @@ private struct ColumnSettings: View {
     }
 }
 
-// MARK: - Integrations
+// MARK: - Agents
 
-private struct IntegrationSettings: View {
+private struct AgentSettings: View {
     @ObservedObject var model: BoardModel
     /// Bumped after installing or removing hooks, so the status line is read again.
     @State private var hooksChanged = 0
     @State private var agentMessage: String?
-    @State private var githubMessage: String?
-    @State private var testingGitHub = false
-    @State private var jiraToken = ""
-    @State private var hasJiraToken = JiraCredentials.hasStoredToken
-    @State private var jiraMessage: String?
-    @State private var testingJira = false
+    @State private var portText = ""
+    @State private var copiedExample = false
 
     var body: some View {
         Form {
@@ -240,40 +239,21 @@ private struct IntegrationSettings: View {
                 }
             }
 
-            Section("GitHub") {
-                Toggle("Show pull request and CI status", isOn: model.binding(\.githubEnabled))
-                TextField("Server", text: model.textBinding(\.githubHost), prompt: Text("github.com"))
-                LabeledContent("GitHub CLI") {
-                    Text(GitHub.cliPath ?? "Not found. Install gh first.")
-                        .foregroundStyle(.secondary)
+            Section("API") {
+                Toggle("Let agents and scripts update the board over HTTP", isOn: model.binding(\.apiEnabled))
+                TextField("Port", text: $portText, prompt: Text(String(BoardConfig.default.apiPort)))
+                    .onSubmit(applyPort)
+                LabeledContent("Status") {
+                    Text(apiStatus).foregroundStyle(.secondary).textSelection(.enabled)
                 }
-                HStack {
-                    Button("Test Connection", action: testGitHub).disabled(testingGitHub)
-                    if testingGitHub { ProgressView().controlSize(.small) }
-                }
-                if let githubMessage {
-                    Text(githubMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                }
-                Text("For GitHub Enterprise, enter your server's address, such as github.example.com. Sign-in is handled by the GitHub CLI.")
+                Button(copiedExample ? "Copied" : "Copy Example Command", action: copyExample)
+                    .disabled(!model.config.apiEnabled)
+                Text("Answers only on this Mac, and only to callers that send the token kept in ~/.taskboard/api-token. The `taskboard` command does the same job without it.")
                     .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("Jira (read-only)") {
-                TextField("Site", text: model.textBinding(\.jiraBaseURL), prompt: Text("https://your-team.atlassian.net"))
-                TextField("Email", text: model.textBinding(\.jiraEmail), prompt: Text("Leave empty for a Data Center token"))
-                SecureField("API token", text: $jiraToken, prompt: Text(hasJiraToken ? "Saved in your Keychain" : "Paste a token"))
-                HStack {
-                    Button("Save Token", action: saveToken).disabled(jiraToken.isEmpty)
-                    if hasJiraToken { Button("Forget Token", action: forgetToken) }
-                    Button("Test Connection", action: testJira).disabled(testingJira || !hasJiraToken)
-                    if testingJira { ProgressView().controlSize(.small) }
-                }
-                if let jiraMessage {
-                    Text(jiraMessage).font(.caption).foregroundStyle(.secondary)
-                }
             }
         }
         .formStyle(.grouped)
+        .onAppear { portText = String(model.config.apiPort) }
     }
 
     /// The CLI ships next to the app binary, inside the bundle.
@@ -281,6 +261,31 @@ private struct IntegrationSettings: View {
         guard let directory = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
         let url = directory.appendingPathComponent("taskboard")
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+    }
+
+    private var apiStatus: String {
+        switch model.apiState {
+        case .starting: return "Starting…"
+        case .listening(let port): return "Listening on http://127.0.0.1:\(port)"
+        case .failed(let reason): return "Not running. \(reason)"
+        case .stopped: return "Off"
+        }
+    }
+
+    private func applyPort() {
+        guard let port = Int(portText.trimmingCharacters(in: .whitespaces)), (1024...65535).contains(port) else {
+            portText = String(model.config.apiPort)
+            return
+        }
+        model.updateConfig { $0.apiPort = port }
+    }
+
+    private func copyExample() {
+        let example = "curl -s -H \"Authorization: Bearer $(cat ~/.taskboard/api-token)\" \(model.config.apiBaseURL)/v1/tasks"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(example, forType: .string)
+        copiedExample = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedExample = false }
     }
 
     private var agent: AgentKind { model.config.agent }
@@ -324,6 +329,72 @@ private struct IntegrationSettings: View {
             agentMessage = "\(error)"
         }
         hooksChanged += 1
+    }
+}
+
+// MARK: - Integrations
+
+private struct IntegrationSettings: View {
+    @ObservedObject var model: BoardModel
+    @State private var githubMessage: String?
+    @State private var testingGitHub = false
+    @State private var jiraToken = ""
+    @State private var hasJiraToken = JiraCredentials.hasStoredToken
+    @State private var jiraMessage: String?
+    @State private var testingJira = false
+
+    var body: some View {
+        Form {
+            Section("GitHub") {
+                Toggle("Show pull request and CI status", isOn: model.binding(\.githubEnabled))
+                TextField("Server", text: model.textBinding(\.githubHost), prompt: Text("github.com"))
+                LabeledContent("GitHub CLI") {
+                    Text(GitHub.cliPath ?? "Not found. Install gh first.")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Test Connection", action: testGitHub).disabled(testingGitHub)
+                    if testingGitHub { ProgressView().controlSize(.small) }
+                }
+                if let githubMessage {
+                    Text(githubMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Text("For GitHub Enterprise, enter your server's address, such as github.example.com. Sign-in is handled by the GitHub CLI.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Browser") {
+                Toggle("Switch to a tab that is already open", isOn: model.binding(\.reuseBrowserTabs))
+                if let extensionFolder {
+                    Button("Show Extension Folder") { NSWorkspace.shared.activateFileViewerSelecting([extensionFolder]) }
+                }
+                Text("Needs the Task Board extension in your browser. In Chrome, open chrome://extensions, turn on Developer mode, click Load unpacked and choose the extension folder. Without it, links open in a new tab as usual.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Jira (read-only)") {
+                TextField("Site", text: model.textBinding(\.jiraBaseURL), prompt: Text("https://your-team.atlassian.net"))
+                TextField("Email", text: model.textBinding(\.jiraEmail), prompt: Text("Leave empty for a Data Center token"))
+                SecureField("API token", text: $jiraToken, prompt: Text(hasJiraToken ? "Saved in your Keychain" : "Paste a token"))
+                HStack {
+                    Button("Save Token", action: saveToken).disabled(jiraToken.isEmpty)
+                    if hasJiraToken { Button("Forget Token", action: forgetToken) }
+                    Button("Test Connection", action: testJira).disabled(testingJira || !hasJiraToken)
+                    if testingJira { ProgressView().controlSize(.small) }
+                }
+                if let jiraMessage {
+                    Text(jiraMessage).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// The browser extension ships inside the app bundle.
+    private var extensionFolder: URL? {
+        guard let folder = Bundle.main.resourceURL?.appendingPathComponent("extension"),
+              FileManager.default.fileExists(atPath: folder.appendingPathComponent("manifest.json").path)
+        else { return nil }
+        return folder
     }
 
     private func testGitHub() {

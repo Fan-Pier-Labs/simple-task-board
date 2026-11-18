@@ -184,6 +184,21 @@ This is the part most likely to need a fix.
 7. Test that questions stay off the board. Ask the user to open a new chat in **Ask** mode and ask
    any question. `taskboard list` should not gain a task.
 
+## 4b. Optional: the browser extension
+
+If the user wants the GitHub button to switch to a pull request's existing tab instead of opening
+another, ask them to load the extension: `chrome://extensions`, **Developer mode** on, **Load
+unpacked**, and the folder shown by Settings → Integrations → Browser → **Show Extension Folder**.
+Then:
+
+```bash
+~/.taskboard/bin/taskboard config reuse-tabs on
+```
+
+Ask the user to open a pull request in a tab, switch to another tab, and click that pull request's
+GitHub button on the board. The first tab should come to the front, with no new tab left behind.
+A company-managed Chrome may not allow unpacked extensions; if so, turn the setting back off.
+
 ## 5. Run the doctor
 
 ```bash

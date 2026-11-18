@@ -35,6 +35,11 @@ scripts/build-app.sh --install   # rebuild, replace /Applications/TaskBoard.app,
   both apps' hooks; `HookInstaller.swift` edits their settings files.
 - `Sources/TaskBoardApp`: the menu bar app (SwiftUI inside an AppKit shell).
 - `Sources/taskboard`: the command line tool that agents and hooks use to write tasks.
+- `extension/`: the Chrome extension that switches to an already-open tab. Its `MARKER` must
+  match `BrowserTabReuse.marker` in `Config.swift`.
+- `docs/api.md`: the HTTP API. `BoardAPI.swift` routes requests, `LocalAPIServer.swift` is the
+  socket, and `TaskEdit.swift` holds the rules for changing a task, which the command line tool
+  uses too. Change a rule there, not in a caller.
 
 To look at the UI without clicking through it, render it to an image:
 
@@ -42,7 +47,7 @@ To look at the UI without clicking through it, render it to an image:
 TASKBOARD_HOME=examples/demo swift run TaskBoardApp --snapshot /tmp/board.png --remote examples/demo/remote.json
 ```
 
-Add `--settings integrations` (or `general`, `columns`) for the settings window, `--layout list`,
+Add `--settings integrations` (or `general`, `columns`, `agents`) for the settings window, `--layout list`,
 `--dark`, `--expand <task-id>` and `--details <task-id>`.
 
 Things to keep true:
@@ -56,3 +61,8 @@ Things to keep true:
 - Installing hooks changes only the hook entries in the app's settings file. It never adds
   permission rules.
 - Titles are at most 50 characters.
+- The API stays on the loopback address, behind its token, and refuses requests from web pages.
+
+To test the extension, drive a throwaway Chrome for Testing over the DevTools protocol, started
+with `--headless=new --load-extension=<path> --use-mock-keychain --password-store=basic` and its
+own `--user-data-dir`. Without the mock keychain it asks the user for their login keychain.

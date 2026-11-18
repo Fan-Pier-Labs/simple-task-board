@@ -262,6 +262,7 @@ final class GitHubAndJiraTests: XCTestCase {
         let store = TaskStore(directory: home.appendingPathComponent("tasks"))
         var config = BoardConfig.default
         config.githubEnabled = false
+        config.apiEnabled = false
         var doctor = Doctor(config: config, store: store)
         doctor.hooksFile = home.appendingPathComponent("hooks.json")
         doctor.cliLink = home.appendingPathComponent("bin/taskboard")
@@ -270,6 +271,7 @@ final class GitHubAndJiraTests: XCTestCase {
         XCTAssertEqual(checks.first { $0.area == "Tasks" }?.outcome, .failure)
         XCTAssertEqual(checks.filter { $0.area == "Cursor" }.map(\.outcome), [.failure, .failure, .warning])
         XCTAssertEqual(checks.first { $0.area == "GitHub" }?.outcome, .warning)
+        XCTAssertEqual(checks.first { $0.area == "API" }?.outcome, .warning)
         XCTAssertEqual(checks.first { $0.area == "Jira" }?.outcome, .warning)
 
         try store.create(TaskItem(id: "", title: "Has an agent", cursorAgent: "chat-1"))
@@ -582,5 +584,172 @@ final class CursorIntegrationTests: XCTestCase {
         try HookInstaller.uninstall(kind: .claude, file: file)
         XCTAssertFalse(HookInstaller.isInstalled(kind: .claude, file: file))
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+}
+
+final class APITests: XCTestCase {
+    var home: URL!
+    var store: TaskStore!
+    var api: BoardAPI!
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("taskboard-api-\(UUID().uuidString)")
+        store = TaskStore(directory: home.appendingPathComponent("tasks"))
+        api = BoardAPI(store: store, token: "secret", config: { .default })
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    /// A well-formed call from this machine, with the token.
+    func call(_ method: String, _ path: String, _ body: [String: Any]? = nil, headers: [String: String] = [:]) -> (status: Int, json: Any?) {
+        var all = ["host": "127.0.0.1:47821", "authorization": "Bearer secret"]
+        all.merge(headers) { $1 }
+        let data = body.map { try! JSONSerialization.data(withJSONObject: $0) } ?? Data()
+        let response = api.respond(to: APIRequest(method: method, path: path, headers: all, body: data))
+        return (response.status, response.json)
+    }
+
+    func object(_ result: (status: Int, json: Any?)) -> [String: Any] {
+        result.json as? [String: Any] ?? [:]
+    }
+
+    func testWebPagesAndStrangersAreKeptOut() {
+        XCTAssertEqual(call("GET", "/v1/tasks", headers: ["authorization": "Bearer wrong"]).status, 401)
+        XCTAssertEqual(call("GET", "/v1/tasks", headers: ["authorization": ""]).status, 401)
+        // A page in a browser names itself in Origin, even when it has the right token.
+        XCTAssertEqual(call("POST", "/v1/tasks", ["title": "x"], headers: ["origin": "https://example.com"]).status, 403)
+        // A domain re-pointed at this machine still shows up in Host.
+        XCTAssertEqual(call("GET", "/v1/tasks", headers: ["host": "evil.example.com:47821"]).status, 403)
+        XCTAssertEqual(call("GET", "/v1/tasks", headers: ["host": "localhost:47821"]).status, 200)
+        // Only the health check works without a token.
+        let health = api.respond(to: APIRequest(method: "GET", path: "/v1/health", headers: ["host": "127.0.0.1"]))
+        XCTAssertEqual(health.status, 200)
+        XCTAssertTrue(store.loadAll().isEmpty)
+    }
+
+    func testCreateReadUpdateAndDelete() throws {
+        let created = call("POST", "/v1/tasks", ["title": "Revamp checkout", "jira": "shop-1"])
+        XCTAssertEqual(created.status, 201)
+        XCTAssertEqual(object(created)["id"] as? String, "revamp-checkout")
+        XCTAssertEqual(object(created)["jira"] as? String, "SHOP-1")
+
+        let child = call("POST", "/v1/tasks", ["title": "Migrate the cart", "parent": "revamp-checkout", "pr": "https://github.example.com/team/app/pull/7"])
+        XCTAssertEqual(child.status, 201)
+
+        let list = call("GET", "/v1/tasks").json as? [[String: Any]]
+        XCTAssertEqual(list?.count, 1, "subtasks are nested, not listed twice")
+        XCTAssertEqual((list?.first?["subtasks"] as? [[String: Any]])?.first?["id"] as? String, "migrate-the-cart")
+
+        let updated = call("PATCH", "/v1/tasks/migrate-the-cart", ["status": "needs-attention", "reason": "Which index?", "pr": NSNull(), "note": "Tried two approaches."])
+        XCTAssertEqual(updated.status, 200)
+        XCTAssertEqual(object(updated)["status"] as? String, "needs-attention")
+        XCTAssertEqual(object(updated)["reason"] as? String, "Which index?")
+        XCTAssertTrue(object(updated)["pr"] is NSNull, "null clears a field")
+        XCTAssertEqual(store.task(id: "migrate-the-cart")?.body, "Tried two approaches.")
+
+        XCTAssertEqual(call("DELETE", "/v1/tasks/revamp-checkout").status, 409, "a parent with subtasks is not deleted")
+        XCTAssertEqual(call("DELETE", "/v1/tasks/migrate-the-cart").status, 204)
+        XCTAssertEqual(call("DELETE", "/v1/tasks/revamp-checkout").status, 204)
+        XCTAssertTrue(store.loadAll().isEmpty)
+    }
+
+    func testBadRequestsSayWhatIsWrong() {
+        func message(_ result: (status: Int, json: Any?)) -> String { object(result)["error"] as? String ?? "" }
+        let long = call("POST", "/v1/tasks", ["title": String(repeating: "x", count: 51)])
+        XCTAssertEqual(long.status, 400)
+        XCTAssertTrue(message(long).contains("at most 50"))
+        XCTAssertEqual(call("POST", "/v1/tasks", ["body": "no title"]).status, 400)
+        XCTAssertEqual(call("GET", "/v1/tasks/nope").status, 404)
+        _ = call("POST", "/v1/tasks", ["title": "Real"])
+        XCTAssertTrue(message(call("PATCH", "/v1/tasks/real", ["status": "banana"])).contains("Unknown status"))
+        XCTAssertTrue(message(call("PATCH", "/v1/tasks/real", ["colour": "red"])).contains("Unknown field"))
+        XCTAssertTrue(message(call("PATCH", "/v1/tasks/real", ["parent": "missing"])).contains("No task with id"))
+        XCTAssertEqual(call("PATCH", "/v1/tasks/real", ["title": 5]).status, 400)
+        XCTAssertEqual(call("PUT", "/v1/tasks/real").status, 405)
+        XCTAssertEqual(call("GET", "/v2/tasks").status, 404)
+        XCTAssertEqual(store.task(id: "real")?.status, .idle, "a refused change changes nothing")
+    }
+
+    func testAnAgentFilesAndReportsThroughItsSession() throws {
+        _ = call("POST", "/v1/tasks", ["title": "Revamp checkout"])
+        // The agent files its chat as a subtask, then reports without ever learning the task's id.
+        let filed = call("POST", "/v1/tasks", ["title": "Add saved cards", "parent": "revamp-checkout", "session": "chat-1", "agent": "claude"])
+        XCTAssertEqual(filed.status, 201)
+        let agent = object(filed)["agent"] as? [String: Any]
+        XCTAssertEqual(agent?["app"] as? String, "claude")
+        XCTAssertEqual(object(filed)["status"] as? String, "working")
+
+        XCTAssertEqual(object(call("GET", "/v1/sessions/chat-1"))["id"] as? String, "add-saved-cards")
+        let done = call("PATCH", "/v1/sessions/chat-1", ["status": "done", "pr": "https://github.example.com/team/app/pull/9"])
+        XCTAssertEqual(object(done)["status"] as? String, "done")
+        XCTAssertEqual(call("GET", "/v1/sessions/chat-unknown").status, 404)
+
+        // A second chat carries on with the parent task.
+        let attached = call("POST", "/v1/sessions/chat-2/attach", ["task": "revamp-checkout"])
+        XCTAssertEqual((object(attached)["agent"] as? [String: Any])?["session"] as? String, "chat-2")
+        XCTAssertEqual(call("POST", "/v1/sessions/chat-2/dismiss").status, 409, "a filed chat is not dismissed")
+        XCTAssertEqual(call("POST", "/v1/sessions/chat-3/dismiss").status, 204)
+    }
+
+    func testRequestParsing() {
+        func parse(_ text: String) -> LocalAPIServer.Parsed { LocalAPIServer.parse(Data(text.utf8)) }
+        guard case .incomplete = parse("POST /v1/tasks HTTP/1.1\r\nHost: 127.0.0.1\r\n") else { return XCTFail("headers not finished") }
+        guard case .incomplete = parse("POST /v1/tasks HTTP/1.1\r\nContent-Length: 10\r\n\r\n{\"a\"") else { return XCTFail("body not finished") }
+        guard case .request(let request) = parse("PATCH /v1/tasks/a%20b?x=1 HTTP/1.1\r\nHost: localhost:1\r\nContent-Length: 2\r\n\r\n{}") else {
+            return XCTFail("a whole request")
+        }
+        XCTAssertEqual(request.method, "PATCH")
+        XCTAssertEqual(request.path, "/v1/tasks/a%20b")
+        XCTAssertEqual(request.headers["host"], "localhost:1")
+        XCTAssertEqual(request.body, Data("{}".utf8))
+        guard case .invalid(400, _) = parse("hello\r\n\r\n") else { return XCTFail("not HTTP") }
+        guard case .invalid(413, _) = parse("POST / HTTP/1.1\r\nContent-Length: 99999999\r\n\r\n") else { return XCTFail("too large") }
+    }
+
+    func testARealRequestOverTheNetwork() async throws {
+        let api = self.api!
+        let listening = expectation(description: "listening")
+        var port = 0
+        let server = try LocalAPIServer(port: 0, handler: { api.respond(to: $0) }, onState: { state in
+            if case .listening(let bound) = state { port = bound; listening.fulfill() }
+        })
+        server.start()
+        defer { server.stop() }
+        await fulfillment(of: [listening], timeout: 5)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/tasks")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["title": "Sent over HTTP"])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 201)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: data) as? [String: Any])?["id"] as? String, "sent-over-http")
+        XCTAssertEqual(store.task(id: "sent-over-http")?.title, "Sent over HTTP")
+
+        var unauthorised = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/tasks")!)
+        unauthorised.setValue("Bearer nope", forHTTPHeaderField: "Authorization")
+        let (_, refused) = try await URLSession.shared.data(for: unauthorised)
+        XCTAssertEqual((refused as? HTTPURLResponse)?.statusCode, 401)
+    }
+
+    func testTokenFileIsPrivateAndStable() throws {
+        let file = home.appendingPathComponent("api-token")
+        let first = try APIToken.loadOrCreate(at: file)
+        XCTAssertEqual(first.count, 64)
+        XCTAssertEqual(try APIToken.loadOrCreate(at: file), first)
+        let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+        XCTAssertEqual(permissions, 0o600)
+    }
+
+    func testLinksAreMarkedForTheBrowserExtension() {
+        func marked(_ text: String) -> String { BrowserTabReuse.marked(URL(string: text)!).absoluteString }
+        XCTAssertEqual(marked("https://github.example.com/team/app/pull/7"), "https://github.example.com/team/app/pull/7#taskboard-reuse")
+        XCTAssertEqual(marked("https://example.atlassian.net/browse/DEMO-1?x=1"), "https://example.atlassian.net/browse/DEMO-1?x=1#taskboard-reuse")
+        // A link with its own fragment, or one that is not for a browser, is left alone.
+        XCTAssertEqual(marked("https://example.com/page#section"), "https://example.com/page#section")
+        XCTAssertEqual(marked("cursor://anysphere.cursor-deeplink/agent?id=1"), "cursor://anysphere.cursor-deeplink/agent?id=1")
+        XCTAssertEqual(marked("file:///tmp/task.md"), "file:///tmp/task.md")
     }
 }
