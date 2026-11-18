@@ -35,6 +35,40 @@ final class BoardModel: ObservableObject {
     var tasksDirectory: URL { BoardPaths.tasksDirectory(for: config) }
     var isEmpty: Bool { tasks.isEmpty }
 
+    // MARK: - Leaving the board for another app
+
+    /// Hides the board. Set by the app delegate, which owns the popover.
+    var closeBoard: () -> Void = {}
+
+    /// Opens a link from a card: the board gets out of the way (unless it is pinned open)
+    /// and the app that takes the link comes to the front.
+    func open(_ url: URL) {
+        if !pinned { closeBoard() }
+
+        // Hand focus over while this app still has it to give. Without this, an app that is
+        // already running can take the link and stay behind whatever was in front.
+        let handler = NSWorkspace.shared.urlForApplication(toOpen: url)?.standardizedFileURL.path
+        let running = NSWorkspace.shared.runningApplications.first {
+            handler != nil && $0.bundleURL?.standardizedFileURL.path == handler
+        }
+        if let running { NSApp.yieldActivation(to: running) }
+        let runningID = running?.processIdentifier
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(url, configuration: configuration) { application, _ in
+            guard let processID = application?.processIdentifier ?? runningID else { return }
+            DispatchQueue.main.async {
+                NSRunningApplication(processIdentifier: processID)?.activate(options: [.activateAllWindows])
+            }
+        }
+    }
+
+    func revealInFinder(_ file: URL) {
+        if !pinned { closeBoard() }
+        NSWorkspace.shared.activateFileViewerSelecting([file])
+    }
+
     // MARK: - Lifecycle
 
     /// Starts watching the tasks folder and polling GitHub and Jira.

@@ -21,7 +21,8 @@ on its own.
 - **Chevron and number** on the left of a task with subtasks. Click it to open them. The parent's
   icon is a summary of its subtasks: any that needs you wins, then any that is working.
 - **Agent button**: opens the chat working on that task, in Cursor or in Claude. It shows that
-  app's icon.
+  app's icon. Clicking it, or any other link on a card, closes the board and brings that app to
+  the front. Pin the board to keep it open instead.
 - **GitHub button**: opens the pull request. Its dot is green, yellow or red for CI, purple once merged.
 - **Jira badge**: the issue key and its Jira status. Click it to open the issue.
 - **Click a title** to open the task: why it needs attention, the full markdown description, and

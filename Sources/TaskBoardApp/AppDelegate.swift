@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var subscriptions = Set<AnyCancellable>()
     private var debugSnapshotSignal: DispatchSourceSignal?
+    private var debugOpenSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         linkBundledCLI()
@@ -39,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] pinned in self?.popover.behavior = pinned ? .applicationDefined : .transient }
             .store(in: &subscriptions)
 
+        model.closeBoard = { [weak self] in self?.popover.performClose(nil) }
         model.start()
 
         installDebugSnapshotHandler()
@@ -77,6 +79,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         source.resume()
         debugSnapshotSignal = source
+
+        // With `TASKBOARD_DEBUG_OPEN_URL=<url>` set as well, SIGUSR2 does what clicking a card's
+        // link to that URL does, so closing the board and focusing the other app can be checked.
+        guard let link = ProcessInfo.processInfo.environment["TASKBOARD_DEBUG_OPEN_URL"].flatMap(URL.init(string:)) else { return }
+        signal(SIGUSR2, SIG_IGN)
+        let opener = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        opener.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.model.open(link) }
+        }
+        opener.resume()
+        debugOpenSignal = opener
     }
 
     // MARK: - Menu bar icon

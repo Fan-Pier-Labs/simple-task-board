@@ -73,7 +73,7 @@ struct TaskRowView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, 2)
                 if let jira = task.jira {
-                    JiraBadge(key: jira, issue: model.remote.jiraIssue(for: task), url: model.config.jiraURL(for: jira))
+                    JiraBadge(key: jira, issue: model.remote.jiraIssue(for: task), url: model.config.jiraURL(for: jira), open: model.open)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -83,7 +83,7 @@ struct TaskRowView: View {
 
             HStack(spacing: 0) {
                 if let agent = task.agent, let url = task.agentURL {
-                    HoverButton(help: "Open the agent in \(agent.kind.displayName)", action: { NSWorkspace.shared.open(url) }) {
+                    HoverButton(help: "Open the agent in \(agent.kind.displayName)", action: { model.open(url) }) {
                         if let icon = Icons.appIcon(for: agent.kind) {
                             Image(nsImage: icon).resizable().interpolation(.high).frame(width: 15, height: 15)
                         } else {
@@ -93,7 +93,7 @@ struct TaskRowView: View {
                     }
                 }
                 if let url = task.prURL {
-                    PullRequestButton(url: url, info: model.remote.pullRequest(for: task))
+                    PullRequestButton(url: url, info: model.remote.pullRequest(for: task), open: model.open)
                 }
             }
         }
@@ -141,6 +141,7 @@ struct TaskRowView: View {
 struct PullRequestButton: View {
     let url: URL
     let info: PullRequestInfo?
+    let open: (URL) -> Void
 
     private var dotColor: Color? {
         guard let info else { return nil }
@@ -164,7 +165,7 @@ struct PullRequestButton: View {
     }
 
     var body: some View {
-        HoverButton(help: help, action: { NSWorkspace.shared.open(url) }) {
+        HoverButton(help: help, action: { open(url) }) {
             Image(nsImage: Icons.github)
                 .renderingMode(.template)
                 .resizable()
@@ -187,9 +188,10 @@ struct JiraBadge: View {
     let key: String
     let issue: JiraIssue?
     let url: URL?
+    let open: (URL) -> Void
 
     var body: some View {
-        Button(action: { if let url { NSWorkspace.shared.open(url) } }) {
+        Button(action: { if let url { open(url) } }) {
             HStack(spacing: 4) {
                 Text(key).font(.system(size: 10, weight: .semibold, design: .monospaced))
                 if let issue {
@@ -247,8 +249,8 @@ struct TaskDetailView: View {
 
             if let file = task.fileURL {
                 HStack(spacing: 12) {
-                    Button("Open file") { NSWorkspace.shared.open(file) }
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+                    Button("Open file") { model.open(file) }
+                    Button("Show in Finder") { model.revealInFinder(file) }
                 }
                 .buttonStyle(.link)
                 .font(.system(size: 11))
