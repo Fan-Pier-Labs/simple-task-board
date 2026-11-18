@@ -75,11 +75,21 @@ final class BoardModel: ObservableObject {
         tasks = TaskStore(directory: tasksDirectory).loadAll()
         rebuild()
 
-        // A task that just gained a PR or Jira key should not wait a full minute for its status.
-        let keys = Set(tasks.compactMap(\.pr) + tasks.compactMap(\.jira))
-        if !keys.isSubset(of: remoteKeys), watcher != nil {
+        // A task that just gained a PR, a branch or a Jira key should not wait a full minute for its status.
+        if !Self.remoteKeys(of: tasks).isSubset(of: remoteKeys), watcher != nil {
             Task { await syncRemote() }
         }
+    }
+
+    /// Everything about the tasks that GitHub or Jira is asked about.
+    private static func remoteKeys(of tasks: [TaskItem]) -> Set<String> {
+        var keys = Set(tasks.compactMap(\.pr) + tasks.compactMap(\.jira))
+        for task in tasks where task.pr == nil && task.status != .done {
+            if let workspace = task.workspace, let branch = task.branch {
+                keys.insert("branch \(branch) in \(workspace)")
+            }
+        }
+        return keys
     }
 
     /// Supplies canned GitHub and Jira state instead of fetching it. Used for snapshots.
@@ -170,14 +180,13 @@ final class BoardModel: ObservableObject {
         }.value
 
         remote = result.remote
-        remoteKeys = Set(snapshot.compactMap(\.pr) + snapshot.compactMap(\.jira))
+        // Pull requests found during this pass were read in it too, so they count as covered.
+        remoteKeys = Self.remoteKeys(of: snapshot).union(result.remote.pullRequests.keys)
         syncNotes = result.notes
         lastSync = Date()
-        if result.wroteFiles {
-            reload()
-        } else {
-            rebuild()
-        }
+        isSyncing = false
+        // `reload` starts another pass if tasks changed while this one was running.
+        reload()
     }
 }
 

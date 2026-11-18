@@ -50,12 +50,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Keeps `~/.taskboard/bin/taskboard` pointing at the CLI inside this copy of the app,
-    /// so installed Cursor hooks keep working after the app moves or updates.
+    /// so installed hooks keep working after the app moves or updates.
     private func linkBundledCLI() {
         guard let directory = Bundle.main.executableURL?.deletingLastPathComponent() else { return }
         let cli = directory.appendingPathComponent("taskboard")
         if FileManager.default.isExecutableFile(atPath: cli.path) {
-            try? CursorInstaller.linkCLI(from: cli)
+            try? HookInstaller.linkCLI(from: cli)
         }
     }
 

@@ -1,7 +1,8 @@
 # Notes for AI agents working in this repository
 
 Task Board is a macOS menu bar app, written in Swift, that shows what many coding agents are
-working on. `README.md` explains what it does and how tasks are stored.
+working on. Agents can run in Cursor or in Claude. `README.md` explains what it does and how tasks
+are stored.
 
 ## This repository is public
 
@@ -19,7 +20,7 @@ home-directory paths.
 ## Setting the app up on the computer where it will be used
 
 Follow [docs/work-computer-setup.md](docs/work-computer-setup.md). It installs the app, connects
-GitHub, Jira and Cursor, and proves each one works.
+GitHub, Jira and the agent app, and proves each one works.
 
 ## Working on the code
 
@@ -29,8 +30,9 @@ swift test
 scripts/build-app.sh --install   # rebuild, replace /Applications/TaskBoard.app, relaunch
 ```
 
-- `Sources/TaskBoardCore`: the model, markdown storage, status roll-up, and the GitHub, Jira and
-  Cursor integrations. No UI. This is what the tests cover.
+- `Sources/TaskBoardCore`: the model, markdown storage, status roll-up, and the GitHub, Jira,
+  Cursor and Claude integrations. No UI. This is what the tests cover. `AgentHooks.swift` handles
+  both apps' hooks; `HookInstaller.swift` edits their settings files.
 - `Sources/TaskBoardApp`: the menu bar app (SwiftUI inside an AppKit shell).
 - `Sources/taskboard`: the command line tool that agents and hooks use to write tasks.
 
@@ -48,5 +50,9 @@ Things to keep true:
 - The app only reads task files, apart from writing a pull request link it discovers. Creating
   and changing tasks goes through the `taskboard` command.
 - Jira is read-only. The client sends `GET` requests and nothing else.
-- A hook must never get in an agent's way: `taskboard hook` always exits 0 and prints valid JSON.
+- A hook must never get in an agent's way: `taskboard hook` always exits 0, and prints valid
+  JSON or nothing. It runs after every Claude tool call, so it must stay fast and write a task
+  file only when something changed.
+- Installing hooks changes only the hook entries in the app's settings file. It never adds
+  permission rules.
 - Titles are at most 50 characters.

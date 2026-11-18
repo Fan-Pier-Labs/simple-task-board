@@ -82,12 +82,13 @@ struct TaskRowView: View {
             .help("Show details")
 
             HStack(spacing: 0) {
-                if let url = task.cursorURL {
-                    HoverButton(help: "Open the agent in Cursor", action: { NSWorkspace.shared.open(url) }) {
-                        if let icon = Icons.cursorApp {
+                if let agent = task.agent, let url = task.agentURL {
+                    HoverButton(help: "Open the agent in \(agent.kind.displayName)", action: { NSWorkspace.shared.open(url) }) {
+                        if let icon = Icons.appIcon(for: agent.kind) {
                             Image(nsImage: icon).resizable().interpolation(.high).frame(width: 15, height: 15)
                         } else {
-                            Image(systemName: "cursorarrow.rays").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Image(systemName: agent.kind == .cursor ? "cursorarrow.rays" : "sparkle")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                     }
                 }

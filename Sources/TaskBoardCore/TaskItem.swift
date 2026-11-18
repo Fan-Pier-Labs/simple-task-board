@@ -39,6 +39,62 @@ public enum TaskStatus: String, CaseIterable, Codable, Sendable {
     }
 }
 
+/// The apps an agent can run in.
+public enum AgentKind: String, Codable, CaseIterable, Sendable {
+    case cursor
+    case claude
+
+    public var displayName: String {
+        switch self {
+        case .cursor: return "Cursor"
+        case .claude: return "Claude"
+        }
+    }
+
+    /// The front matter key that holds this app's session id.
+    var frontMatterKey: String {
+        switch self {
+        case .cursor: return "cursor_agent"
+        case .claude: return "claude_session"
+        }
+    }
+}
+
+/// The agent chat working on a task: which app it is in, and that app's id for it.
+public struct AgentLink: Equatable, Sendable {
+    public var kind: AgentKind
+    public var session: String
+
+    public init(kind: AgentKind, session: String) {
+        self.kind = kind
+        self.session = session
+    }
+
+    /// Deep link that opens this chat in its app.
+    public var url: URL? {
+        var components = URLComponents()
+        switch kind {
+        case .cursor:
+            components.scheme = "cursor"
+            components.host = "anysphere.cursor-deeplink"
+            components.path = "/agent"
+            components.queryItems = [URLQueryItem(name: "id", value: session)]
+        case .claude:
+            components.scheme = "claude"
+            if session.hasPrefix("local_") {
+                // A session in the Claude desktop app. This is the link the app itself gives out for one.
+                components.host = "claude.ai"
+                components.path = "/epitaxy/\(session)"
+            } else {
+                // A session started in the `claude` command; the desktop app imports and opens it.
+                components.host = "resume"
+                components.queryItems = [URLQueryItem(name: "session", value: session)]
+            }
+        }
+        return components.url
+    }
+}
+
 /// One task or subtask, backed by one markdown file.
 public struct TaskItem: Identifiable, Equatable {
     /// Titles are meant to be scannable in a narrow card.
@@ -55,8 +111,8 @@ public struct TaskItem: Identifiable, Equatable {
     public var jira: String?
     /// URL of the GitHub pull request.
     public var pr: String?
-    /// Cursor chat id of the agent working on this task.
-    public var cursorAgent: String?
+    /// The agent chat working on this task, in Cursor or Claude.
+    public var agent: AgentLink?
     /// Folder the agent works in; used to discover the PR for its branch.
     public var workspace: String?
     public var branch: String?
@@ -65,6 +121,8 @@ public struct TaskItem: Identifiable, Equatable {
     /// True while the task is a stand-in made from an agent's first prompt, before the agent
     /// has filed itself under the right task.
     public var autoCreated: Bool
+    /// True while the agent is stopped on a permission prompt. Cleared as soon as it moves again.
+    public var awaitingApproval: Bool
     public var created: Date?
     public var updated: Date?
     /// The markdown below the front matter.
@@ -83,6 +141,7 @@ public struct TaskItem: Identifiable, Equatable {
         jira: String? = nil,
         pr: String? = nil,
         cursorAgent: String? = nil,
+        claudeSession: String? = nil,
         workspace: String? = nil,
         branch: String? = nil,
         attention: String? = nil,
@@ -99,11 +158,13 @@ public struct TaskItem: Identifiable, Equatable {
         self.parent = parent
         self.jira = jira
         self.pr = pr
-        self.cursorAgent = cursorAgent
+        self.agent = cursorAgent.map { AgentLink(kind: .cursor, session: $0) }
+            ?? claudeSession.map { AgentLink(kind: .claude, session: $0) }
         self.workspace = workspace
         self.branch = branch
         self.attention = attention
         self.autoCreated = autoCreated
+        self.awaitingApproval = false
         self.created = created
         self.updated = updated
         self.body = body
@@ -122,6 +183,8 @@ public struct TaskItem: Identifiable, Equatable {
         static let jira = "jira"
         static let pr = "pr"
         static let cursorAgent = "cursor_agent"
+        static let claudeSession = "claude_session"
+        static let awaitingApproval = "awaiting_approval"
         static let workspace = "workspace"
         static let branch = "branch"
         static let attention = "attention"
@@ -130,8 +193,8 @@ public struct TaskItem: Identifiable, Equatable {
         static let updated = "updated"
 
         static let all: Set<String> = [
-            id, title, column, status, parent, jira, pr, cursorAgent,
-            workspace, branch, attention, autoCreated, created, updated,
+            id, title, column, status, parent, jira, pr, cursorAgent, claudeSession,
+            workspace, branch, attention, autoCreated, awaitingApproval, created, updated,
         ]
     }
 
@@ -152,11 +215,14 @@ public struct TaskItem: Identifiable, Equatable {
         self.parent = value(Key.parent)
         self.jira = value(Key.jira)?.uppercased()
         self.pr = value(Key.pr)
-        self.cursorAgent = value(Key.cursorAgent)
+        self.agent = AgentKind.allCases.lazy.compactMap { kind in
+            value(kind.frontMatterKey).map { AgentLink(kind: kind, session: $0) }
+        }.first
         self.workspace = value(Key.workspace)
         self.branch = value(Key.branch)
         self.attention = value(Key.attention)
         self.autoCreated = value(Key.autoCreated)?.lowercased() == "true"
+        self.awaitingApproval = value(Key.awaitingApproval)?.lowercased() == "true"
         self.created = value(Key.created).flatMap(DateCoding.parse)
         self.updated = value(Key.updated).flatMap(DateCoding.parse)
         self.body = document.body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -173,11 +239,12 @@ public struct TaskItem: Identifiable, Equatable {
         document[Key.parent] = parent
         document[Key.jira] = jira
         document[Key.pr] = pr
-        document[Key.cursorAgent] = cursorAgent
+        if let agent { document[agent.kind.frontMatterKey] = agent.session }
         document[Key.workspace] = workspace
         document[Key.branch] = branch
         document[Key.attention] = attention
         document[Key.autoCreated] = autoCreated ? "true" : nil
+        document[Key.awaitingApproval] = awaitingApproval ? "true" : nil
         document[Key.created] = created.map(DateCoding.string)
         document[Key.updated] = updated.map(DateCoding.string)
         document.fields.append(contentsOf: extraFields)
@@ -198,15 +265,10 @@ public struct TaskItem: Identifiable, Equatable {
 
     // MARK: - Links
 
-    /// Deep link that opens this task's agent chat in the Cursor desktop app.
-    public var cursorURL: URL? {
-        guard let cursorAgent, !cursorAgent.isEmpty else { return nil }
-        var components = URLComponents()
-        components.scheme = "cursor"
-        components.host = "anysphere.cursor-deeplink"
-        components.path = "/agent"
-        components.queryItems = [URLQueryItem(name: "id", value: cursorAgent)]
-        return components.url
+    /// Deep link that opens this task's agent chat in its app.
+    public var agentURL: URL? {
+        guard let agent, !agent.session.isEmpty else { return nil }
+        return agent.url
     }
 
     public var prURL: URL? {
@@ -238,8 +300,10 @@ extension String {
     }
 
     /// Shortens to `limit` characters on a word boundary, ending in an ellipsis.
+    /// Markup tags are dropped first: an app can hand a hook a prompt wrapped in them.
     public func truncatedTitle(limit: Int = TaskItem.maxTitleLength) -> String {
-        let singleLine = components(separatedBy: .newlines)
+        let withoutTags = replacingOccurrences(of: "</?[A-Za-z][A-Za-z0-9_-]*>", with: " ", options: .regularExpression)
+        let singleLine = withoutTags.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? ""
         guard singleLine.count > limit else { return singleLine }

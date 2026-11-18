@@ -5,7 +5,7 @@ import TaskBoardCore
 /// Renders the board or the settings window to a PNG without showing anything on screen.
 /// Used to check the UI from the command line and to produce the README screenshots.
 ///
-///     TaskBoardApp --snapshot board.png [--remote state.json] [--expand id,id]
+///     TaskBoardApp --snapshot board.png [--remote state.json | --sync] [--expand id,id]
 ///                  [--details id,id] [--layout board|list] [--dark]
 ///     TaskBoardApp --snapshot settings.png --settings general|columns|integrations
 @MainActor
@@ -28,6 +28,15 @@ enum Snapshot {
            let data = FileManager.default.contents(atPath: path),
            let remote = try? JSONDecoder().decode(RemoteState.self, from: data) {
             model.setRemoteForPreview(remote)
+        }
+        // `--sync` asks GitHub and Jira for real, exactly as the running app does.
+        if arguments.contains("--sync") {
+            var finished = false
+            Task {
+                await model.syncRemote()
+                finished = true
+            }
+            while !finished { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
         }
         model.expandedSubtasks = ids("--expand")
         model.expandedDetails = ids("--details")

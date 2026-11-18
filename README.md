@@ -3,24 +3,25 @@
 A small macOS menu bar board for keeping track of many coding agents at once.
 
 Click the menu bar icon and a board drops down. Each card is one task: a short title, a status
-icon, a button that opens the task's Cursor agent, and a button that opens its GitHub pull request.
-Tasks can have subtasks (one level deep), can be linked to a Jira issue or stay local, and are
-stored as plain markdown files on your disk.
+icon, a button that opens the task's agent chat in Cursor or Claude, and a button that opens its
+GitHub pull request. Tasks can have subtasks (one level deep), can be linked to a Jira issue or
+stay local, and are stored as plain markdown files on your disk.
 
 ![The board, with one task's subtasks open and another task's details open](docs/board.png)
 
-The app only reads. Agents write the task files through a small command line tool, and Cursor hooks
-keep each task's status in step with its agent, so the board fills in and updates on its own.
+The app only reads. Agents write the task files through a small command line tool, and hooks in
+Cursor or Claude keep each task's status in step with its agent, so the board fills in and updates
+on its own.
 
 ## What you see
 
 - **Status icon** on every card: a spinner while an agent is working, an orange mark when the task
-  needs you (the agent finished its turn or is blocked, CI is failing, or changes were requested),
-  a green check when done, an empty circle when nothing is happening.
+  needs you (the agent finished its turn, is waiting for a permission, CI is failing, or changes
+  were requested), a green check when done, an empty circle when nothing is happening.
 - **Chevron and number** on the left of a task with subtasks. Click it to open them. The parent's
   icon is a summary of its subtasks: any that needs you wins, then any that is working.
-- **Cursor button**: opens `cursor://anysphere.cursor-deeplink/agent?id=<chat-id>` for the chat
-  working on that task.
+- **Agent button**: opens the chat working on that task, in Cursor or in Claude. It shows that
+  app's icon.
 - **GitHub button**: opens the pull request. Its dot is green, yellow or red for CI, purple once merged.
 - **Jira badge**: the issue key and its Jira status. Click it to open the issue.
 - **Click a title** to open the task: why it needs attention, the full markdown description, and
@@ -31,7 +32,8 @@ keep each task's status in step with its agent, so the board fills in and update
   <img src="docs/list-dark.png" width="400" alt="The list layout in dark mode">
 
 Settings (the gear, or right-click the menu bar icon) let you add, rename, reorder and remove
-columns, choose the tasks folder, and connect Cursor, GitHub and Jira.
+columns, choose the tasks folder, pick whether your agents run in Cursor or Claude, and connect
+GitHub and Jira.
 
 ## Install
 
@@ -50,7 +52,7 @@ To try it with sample data without installing anything:
 TASKBOARD_HOME=examples/demo swift run TaskBoardApp --show-board
 ```
 
-Setting it up for real means connecting Cursor, GitHub and Jira and checking each one. Those steps
+Setting it up for real means connecting your agent app, GitHub and Jira and checking each one. Those steps
 are written out for an AI agent to follow with you in
 [docs/work-computer-setup.md](docs/work-computer-setup.md).
 
@@ -84,6 +86,7 @@ Swap every `/v1/cart` call for the v2 client.
 | `jira` | Jira issue key. Leave out for a local-only task. |
 | `pr` | Pull request URL. |
 | `cursor_agent` | Id of the Cursor chat working on the task. |
+| `claude_session` | Id of the Claude session working on the task, instead of `cursor_agent`. |
 | `workspace`, `branch` | Where the agent works. Used to find the pull request for its branch. |
 
 Fields the app does not know are left alone. You can edit the files by hand; the board updates as
@@ -113,7 +116,7 @@ Run `taskboard help` for everything else.
 ```text
 Cursor
   ✓ The hooks are installed in ~/.cursor/hooks.json.
-  ! No agent chat has reported yet, so the hooks are unproven.
+  ! No Cursor chat has reported yet, so the hooks are unproven.
       → Start a new agent chat in Cursor, send it a prompt, then run this again.
 
 GitHub
@@ -121,32 +124,55 @@ GitHub
   ✓ Read https://github.example.com/team/app/pull/7: Open · checks passing.
 ```
 
-`taskboard config` shows the connection settings, and `taskboard config github-server <host>`,
-`jira-site <url>` and `jira-email <email>` change them. The running app picks changes up at once.
+`taskboard config` shows the connection settings, and `taskboard config agent <cursor|claude>`,
+`github-server <host>`, `jira-site <url>` and `jira-email <email>` change them. The running app
+picks changes up at once.
 
-## Cursor
+## Cursor and Claude
 
-In Settings → Integrations, click **Install** under Cursor (or run
-`taskboard install-cursor-hooks`). This adds four entries to `~/.cursor/hooks.json`, next to any
-hooks you already have:
+Pick the app your agents run in under Settings → Integrations → **Agents run in**, then click
+**Install** below it. From a terminal, that is `taskboard config agent claude` (or `cursor`) and
+`taskboard install-claude-hooks` (or `install-cursor-hooks`).
 
-| Hook | What it does |
-| --- | --- |
-| `sessionStart` | Gives the new agent its chat id and asks it to file itself on the board. |
-| `beforeSubmitPrompt` | Marks the chat's task as working. A chat with no task yet gets one, titled from your prompt, so it shows up at once. |
-| `stop` | The agent finished its turn, so the task now needs you. |
-| `sessionEnd` | Clears the spinner if the chat closes mid-run. |
+Installing adds a few hook entries to the app's own settings, next to any hooks you already have:
+`~/.cursor/hooks.json` for Cursor, `~/.claude/settings.json` for Claude. A copy of Claude's file as
+it was is kept beside it as `settings.json.before-taskboard`.
+
+| When | Cursor hook | Claude hook | What it does |
+| --- | --- | --- | --- |
+| A chat starts | `sessionStart` | `SessionStart` | Gives the new agent its session id and asks it to file itself on the board. |
+| You send a prompt | `beforeSubmitPrompt` | `UserPromptSubmit` | Marks the chat's task as working. A chat with no task yet gets one, titled from your prompt, so it shows up at once. |
+| The agent's turn ends | `stop` | `Stop` | The task now needs you. |
+| The agent asks for a permission | none | `Notification` | The task needs you now, mid-turn. |
+| A tool finishes | none | `PostToolUse` | Clears that, once you have answered and the agent is moving again. |
+| The chat closes | `sessionEnd` | `SessionEnd` | Clears a spinner that would otherwise spin forever. |
 
 Filing works like this: the agent runs `taskboard list`, then decides where its work belongs. If
 you asked it to carry on with an existing task it attaches to that task; if the work is a new piece
-of an existing task it adds a subtask there; otherwise it creates a new top-level task. It also
-records the pull request it opens. The agent makes that judgement, so the app needs no model of its
-own.
+of an existing task it adds a subtask there; otherwise it creates a new top-level task. A chat that
+is only a quick question it dismisses, which takes it off the board. It also records the pull
+request it opens. The agent makes that judgement, so the app needs no model of its own.
 
-Chats in Ask mode are left off the board.
+An agent that reaches the end of its turn without having filed its chat is sent back once to do
+it (Claude only). Until a chat is filed, its card is titled with the first words of your prompt.
 
-To see exactly what Cursor sends, run `touch ~/.taskboard/hooks.log`. Every hook call is then
-recorded there, prompts included, until you delete the file.
+The agent button opens these links:
+
+| Chat | Link |
+| --- | --- |
+| Cursor | `cursor://anysphere.cursor-deeplink/agent?id=<chat id>` |
+| Claude desktop app | `claude://claude.ai/epitaxy/<session id>` |
+| `claude` in a terminal | `claude://resume?session=<session id>`, which opens it in the desktop app |
+
+Things to know:
+
+- Claude asks before it first runs the `taskboard` command in a chat. Choose to always allow it,
+  or every new chat will stop to ask. The card shows "needs you" while it waits.
+- Cursor has no hook for an agent stopped on an approval prompt, so in Cursor the card changes only
+  when the turn ends. Cursor chats in Ask mode are left off the board.
+- To see exactly what the app sends, run `touch ~/.taskboard/hooks.log`. Every hook call is then
+  recorded there, prompts included, until you delete the file.
+- Remove the hooks (Settings, or `taskboard uninstall-claude-hooks`) before deleting the app.
 
 ## GitHub
 
@@ -187,6 +213,6 @@ TASKBOARD_HOME=examples/demo swift run TaskBoardApp --snapshot board.png --remot
 
 - Creating or updating Jira issues from tasks. Jira is read-only for now.
 - Editing tasks from the board. The board is a viewer.
-- Telling that an agent is paused on an approval prompt mid-turn. Cursor has no hook for that; the
-  task flips to "needs you" when the turn ends.
-- Cloud agents. Cursor does not run user-level hooks for them.
+- Telling that a Cursor agent is paused on an approval prompt mid-turn. Cursor has no hook for
+  that; the task flips to "needs you" when the turn ends. Claude does report it.
+- Cloud agents. Neither app runs your own machine's hooks for them.

@@ -4,11 +4,15 @@ These steps are for an AI coding agent to carry out together with its user, on t
 user runs Cursor agents. They install the app, connect GitHub, Jira and Cursor, and prove that each
 connection works.
 
-The app was built on a different computer. Its unit tests pass and pull request status has been
-checked against github.com, but three things have never run against the real service: the Cursor
-hooks, the Cursor deep link, and Jira. Expect to find a problem in at least one of them. Finding
-and fixing those is the point of this document. [What has not been proven](#what-has-not-been-proven)
-says where to look.
+The app was built on a different computer. Its unit tests pass, pull request status has been
+checked against github.com, and the hooks have been run with real Claude sessions. Three things
+have never run against the real service: the Cursor hooks, the Cursor deep link, and Jira. Expect
+to find a problem in at least one of them. Finding and fixing those is the point of this document.
+[What has not been proven](#what-has-not-been-proven) says where to look.
+
+These steps assume the agents run in Cursor. If they run in Claude instead, use
+`taskboard config agent claude` and `taskboard install-claude-hooks` in step 4, and expect Claude's
+event names in the hook log (`SessionStart`, `UserPromptSubmit`, `Stop`).
 
 ## Rules
 
@@ -123,6 +127,7 @@ This is the part most likely to need a fix.
 1. Install the hooks and turn on the hook log, which records exactly what Cursor sends:
 
    ```bash
+   ~/.taskboard/bin/taskboard config agent cursor
    ~/.taskboard/bin/taskboard install-cursor-hooks
    touch ~/.taskboard/hooks.log
    ~/.taskboard/bin/taskboard add "Task Board setup check"
@@ -144,13 +149,15 @@ This is the part most likely to need a fix.
    ~/.taskboard/bin/taskboard list
    ```
 
-   You should see all of the following. For each one that is missing, the file to fix is
-   `Sources/TaskBoardCore/CursorHooks.swift`.
+   Each entry in the log starts with a line naming the app and the chat the call was matched to,
+   followed by `in:` (what Cursor sent) and `out:` (what the hook answered). You should see all of
+   the following. For each one that is missing, the file to fix is
+   `Sources/TaskBoardCore/AgentHooks.swift`.
 
    | Expect | If not |
    | --- | --- |
    | A `sessionStart` entry whose `out:` has `additional_context` and `env`. | Cursor did not run the hook. Check `~/.cursor/hooks.json`, and Cursor's Hooks output channel for errors. |
-   | A `beforeSubmitPrompt` entry whose `in:` has `conversation_id`, `prompt` and `workspace_roots`. | The field names differ from what the code reads. Update `respond(to:)` to match the log. |
+   | A `beforeSubmitPrompt` entry whose `in:` has `conversation_id`, `prompt` and `workspace_roots`. | The field names differ from what the code reads. Update the `.cursor` case of `parse` to match the log. |
    | A `stop` entry whose `in:` has `status`. | Same. |
    | `taskboard list` shows a new subtask under `task-board-setup-check`. | See the next two rows. |
    | The new task is a subtask with a short title the agent chose. | If it is a top-level task titled with the start of the prompt, the hooks worked but the agent did not file itself. Ask the user to ask that chat "What were you told about Task Board?". If it knows nothing, Cursor is not passing `additional_context` to the agent. If it knows, the wording in `agentInstructions` needs to be firmer. |
@@ -166,8 +173,8 @@ This is the part most likely to need a fix.
    open "cursor://anysphere.cursor-deeplink/agent?id=<that id>"
    ```
 
-   The link is built in `cursorURL` in `Sources/TaskBoardCore/TaskItem.swift`. If Cursor needs a
-   different link for a local chat, change it there and update `testCursorDeepLink`.
+   The link is built in `AgentLink.url` in `Sources/TaskBoardCore/TaskItem.swift`. If Cursor needs
+   a different link for a local chat, change it there and update `testAgentDeepLinks`.
 6. Test carrying on with existing work. Ask the user to open another new chat and send:
 
    > Keep going on the Task Board setup check: create and delete taskboard-check-2.txt.
@@ -216,9 +223,9 @@ Check the diff against rule 1 first.
 
 | Part | Risk | Where |
 | --- | --- | --- |
-| Cursor hook payloads | Field names were taken from Cursor's documentation, not from a real run. | `Sources/TaskBoardCore/CursorHooks.swift` |
+| Cursor hook payloads | Field names were taken from Cursor's documentation, not from a real run. | `parse` in `Sources/TaskBoardCore/AgentHooks.swift` |
 | Agent self-filing | Depends on Cursor handing the `sessionStart` hook's `additional_context` to the agent, and on the agent acting on it. | `agentInstructions` in the same file |
-| Cursor button | The link format may open cloud agents only, not local chats. | `cursorURL` in `Sources/TaskBoardCore/TaskItem.swift` |
+| Cursor button | The link format may open cloud agents only, not local chats. | `AgentLink.url` in `Sources/TaskBoardCore/TaskItem.swift` |
 | Jira | Never run against a real site. Uses `rest/api/2/issue/<KEY>` and `rest/api/2/myself`. | `Sources/TaskBoardCore/Jira.swift` |
 | GitHub Enterprise | Works on github.com. On another server it relies on `gh` taking the server from the pull request URL or the git remote. | `Sources/TaskBoardCore/GitHub.swift` |
 | Agent paused on an approval prompt | Not detectable: Cursor has no hook for it. The card changes only when the turn ends. | |

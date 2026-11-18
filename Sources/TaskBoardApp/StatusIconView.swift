@@ -66,15 +66,22 @@ enum Icons {
         return image
     }()
 
-    /// Cursor's own icon, read from the installed app rather than shipped with this one.
-    static let cursorApp: NSImage? = {
-        guard let probe = URL(string: "cursor://open"),
-              let app = NSWorkspace.shared.urlForApplication(toOpen: probe)
-        else { return nil }
-        let icon = NSWorkspace.shared.icon(forFile: app.path)
-        icon.size = NSSize(width: 32, height: 32)
+    /// The agent app's own icon, read from the installed app rather than shipped with this one.
+    /// The app is found by asking which one opens its links.
+    @MainActor
+    static func appIcon(for kind: AgentKind) -> NSImage? {
+        if let cached = appIcons[kind] { return cached }
+        var icon: NSImage?
+        if let probe = URL(string: "\(kind.rawValue)://open"),
+           let app = NSWorkspace.shared.urlForApplication(toOpen: probe) {
+            icon = NSWorkspace.shared.icon(forFile: app.path)
+            icon?.size = NSSize(width: 32, height: 32)
+        }
+        appIcons[kind] = .some(icon)
         return icon
-    }()
+    }
+
+    @MainActor private static var appIcons: [AgentKind: NSImage?] = [:]
 }
 
 /// A borderless button that highlights on hover, sized for a card's icon row.

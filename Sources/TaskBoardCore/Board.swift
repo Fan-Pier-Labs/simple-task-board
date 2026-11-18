@@ -179,7 +179,7 @@ public enum BoardBuilder {
             return column
         }
 
-        let isActive = everything.contains { $0.cursorAgent != nil || $0.pr != nil || $0.status != .idle }
+        let isActive = everything.contains { $0.agent != nil || $0.pr != nil || $0.status != .idle }
         if isActive, let column = config.column(id: automation.active) {
             return column
         }

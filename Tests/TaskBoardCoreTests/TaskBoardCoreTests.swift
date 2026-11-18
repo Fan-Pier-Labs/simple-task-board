@@ -68,15 +68,34 @@ final class FrontMatterTests: XCTestCase {
         XCTAssertLessThanOrEqual(short.count, TaskItem.maxTitleLength)
         XCTAssertTrue(short.hasSuffix("…"))
         XCTAssertEqual("  \nshort one\nsecond line".truncatedTitle(), "short one")
+        XCTAssertEqual("<bash-input>swift test</bash-input>".truncatedTitle(), "swift test")
+        XCTAssertEqual("Is a < b and b > c here?".truncatedTitle(), "Is a < b and b > c here?")
     }
 
-    func testCursorDeepLink() {
-        let task = TaskItem(id: "a", title: "A", cursorAgent: "617e7b4c-1c4b-4cf2-8a98-d881f2dc99b5")
+    func testAgentDeepLinks() {
+        let id = "617e7b4c-1c4b-4cf2-8a98-d881f2dc99b5"
         XCTAssertEqual(
-            task.cursorURL?.absoluteString,
-            "cursor://anysphere.cursor-deeplink/agent?id=617e7b4c-1c4b-4cf2-8a98-d881f2dc99b5"
+            TaskItem(id: "a", title: "A", cursorAgent: id).agentURL?.absoluteString,
+            "cursor://anysphere.cursor-deeplink/agent?id=\(id)"
         )
-        XCTAssertNil(TaskItem(id: "b", title: "B").cursorURL)
+        // A session in the Claude desktop app, and one started in the `claude` command.
+        XCTAssertEqual(
+            TaskItem(id: "a", title: "A", claudeSession: "local_\(id)").agentURL?.absoluteString,
+            "claude://claude.ai/epitaxy/local_\(id)"
+        )
+        XCTAssertEqual(
+            TaskItem(id: "a", title: "A", claudeSession: id).agentURL?.absoluteString,
+            "claude://resume?session=\(id)"
+        )
+        XCTAssertNil(TaskItem(id: "b", title: "B").agentURL)
+    }
+
+    func testAgentLinkRoundTripsThroughTheFile() {
+        let claude = TaskItem(markdown: TaskItem(id: "a", title: "A", claudeSession: "local_1").markdown(), fallbackID: "a")
+        XCTAssertEqual(claude.agent, AgentLink(kind: .claude, session: "local_1"))
+        XCTAssertTrue(claude.markdown().contains("claude_session: local_1"))
+        let cursor = TaskItem(markdown: "---\ncursor_agent: chat-9\n---\n", fallbackID: "b")
+        XCTAssertEqual(cursor.agent, AgentLink(kind: .cursor, session: "chat-9"))
     }
 }
 
@@ -254,7 +273,7 @@ final class GitHubAndJiraTests: XCTestCase {
         XCTAssertEqual(checks.first { $0.area == "Jira" }?.outcome, .warning)
 
         try store.create(TaskItem(id: "", title: "Has an agent", cursorAgent: "chat-1"))
-        try CursorInstaller.install(cliPath: doctor.cliLink.path, hooksFile: doctor.hooksFile)
+        try HookInstaller.install(kind: .cursor, cliPath: doctor.cliLink.path, file: doctor.hooksFile)
         checks = await doctor.run()
         XCTAssertEqual(checks.first { $0.area == "Tasks" }?.outcome, .pass)
         XCTAssertEqual(checks.filter { $0.area == "Cursor" }.map(\.outcome), [.failure, .pass, .pass])
@@ -282,13 +301,15 @@ final class GitHubAndJiraTests: XCTestCase {
 final class CursorIntegrationTests: XCTestCase {
     var home: URL!
     var store: TaskStore!
-    var hooks: CursorHooks!
+    var hooks: AgentHooks!
 
     override func setUpWithError() throws {
         home = FileManager.default.temporaryDirectory.appendingPathComponent("taskboard-tests-\(UUID().uuidString)")
         store = TaskStore(directory: home.appendingPathComponent("tasks"))
-        hooks = CursorHooks(store: store, cliPath: "/opt/tb/taskboard")
+        hooks = AgentHooks(store: store, cliPath: "/opt/tb/taskboard")
         hooks.branchLookup = { _ in "feature/rate-limit" }
+        // These tests may themselves run inside an agent session; do not inherit its ids.
+        hooks.environment = [:]
     }
 
     override func tearDownWithError() throws {
@@ -296,9 +317,11 @@ final class CursorIntegrationTests: XCTestCase {
     }
 
     @discardableResult
-    func send(_ event: [String: Any]) -> [String: Any] {
+    func send(_ event: [String: Any], from kind: AgentKind = .cursor) -> [String: Any] {
         let payload = try! JSONSerialization.data(withJSONObject: event)
-        return try! JSONSerialization.jsonObject(with: hooks.handle(payload: payload)) as! [String: Any]
+        let output = hooks.handle(payload: payload, from: kind)
+        if output.isEmpty { return [:] }
+        return try! JSONSerialization.jsonObject(with: output) as! [String: Any]
     }
 
     func testSessionStartHandsTheAgentItsIDAndInstructions() {
@@ -306,6 +329,7 @@ final class CursorIntegrationTests: XCTestCase {
         XCTAssertEqual((output["env"] as? [String: String])?["TASKBOARD_SESSION"], "chat-1")
         let context = output["additional_context"] as? String ?? ""
         XCTAssertTrue(context.contains("/opt/tb/taskboard attach <task-id> --session chat-1"))
+        XCTAssertTrue(context.contains("/opt/tb/taskboard dismiss --session chat-1"))
     }
 
     func testFirstPromptCreatesAStandInThatTheAgentRefiles() throws {
@@ -317,7 +341,8 @@ final class CursorIntegrationTests: XCTestCase {
         ])
         XCTAssertEqual(output["continue"] as? Bool, true)
 
-        let standIn = try XCTUnwrap(store.loadAll().first { $0.cursorAgent == "chat-1" })
+        let standIn = try XCTUnwrap(store.loadAll().first { $0.agent?.session == "chat-1" })
+        XCTAssertEqual(standIn.agent?.kind, .cursor)
         XCTAssertTrue(standIn.autoCreated)
         XCTAssertEqual(standIn.status, .working)
         XCTAssertEqual(standIn.workspace, "/work/app")
@@ -341,7 +366,7 @@ final class CursorIntegrationTests: XCTestCase {
         XCTAssertEqual(store.loadAll().count, 2)
 
         let task = try SessionLinker(store: store).attach(taskID: "fix-login-redirect", session: "chat-2")
-        XCTAssertEqual(task.cursorAgent, "chat-2")
+        XCTAssertEqual(task.agent, AgentLink(kind: .cursor, session: "chat-2"))
         XCTAssertEqual(task.status, .working)
         XCTAssertEqual(store.loadAll().map(\.id), ["fix-login-redirect"])
     }
@@ -373,7 +398,8 @@ final class CursorIntegrationTests: XCTestCase {
     }
 
     func testMalformedPayloadIsHarmless() {
-        XCTAssertEqual(String(decoding: hooks.handle(payload: Data("nope".utf8)), as: UTF8.self), "{}")
+        XCTAssertEqual(String(decoding: hooks.handle(payload: Data("nope".utf8), from: .cursor), as: UTF8.self), "{}")
+        XCTAssertTrue(hooks.handle(payload: Data("nope".utf8), from: .claude).isEmpty)
     }
 
     func testNewSubtaskUnderASubtaskLandsOnTheTopLevelTask() throws {
@@ -388,15 +414,173 @@ final class CursorIntegrationTests: XCTestCase {
             "version": 1,
             "hooks": ["stop": [["command": "./hooks/notify.sh"]], "afterFileEdit": [["command": "./fmt.sh"]]],
         ]
-        let once = CursorInstaller.merged(existing: existing, cliPath: "/a/taskboard")
-        let twice = CursorInstaller.merged(existing: once, cliPath: "/b/taskboard")
+        let once = HookInstaller.merged(existing: existing, kind: .cursor, cliPath: "/a/taskboard")
+        let twice = HookInstaller.merged(existing: once, kind: .cursor, cliPath: "/b/taskboard")
         let hooks = twice["hooks"] as! [String: [[String: String]]]
-        XCTAssertEqual(hooks["stop"]!.map { $0["command"]! }, ["./hooks/notify.sh", "\"/b/taskboard\" hook"])
+        XCTAssertEqual(hooks["stop"]!.map { $0["command"]! }, ["./hooks/notify.sh", "\"/b/taskboard\" hook cursor"])
         XCTAssertEqual(hooks["afterFileEdit"]!.count, 1)
         XCTAssertEqual(hooks["sessionStart"]!.count, 1)
 
-        let cleaned = CursorInstaller.removed(existing: twice)["hooks"] as! [String: [[String: String]]]
+        let cleaned = HookInstaller.removed(existing: twice, kind: .cursor)["hooks"] as! [String: [[String: String]]]
         XCTAssertEqual(cleaned["stop"]!.map { $0["command"]! }, ["./hooks/notify.sh"])
         XCTAssertNil(cleaned["sessionStart"])
+    }
+
+    // MARK: - Claude
+
+    func testClaudeSessionStartAddsContextAndOtherEventsSayNothing() {
+        let output = send(["hook_event_name": "SessionStart", "session_id": "uuid-1", "source": "startup", "cwd": "/work/app"], from: .claude)
+        let specific = output["hookSpecificOutput"] as? [String: String]
+        XCTAssertEqual(specific?["hookEventName"], "SessionStart")
+        XCTAssertTrue(specific?["additionalContext"]?.contains("--session uuid-1") ?? false)
+
+        let payload = try! JSONSerialization.data(withJSONObject: ["hook_event_name": "UserPromptSubmit", "session_id": "uuid-1", "prompt": "do it"])
+        XCTAssertTrue(hooks.handle(payload: payload, from: .claude).isEmpty, "Claude treats any output as something to act on")
+    }
+
+    func testClaudeTurnWithAPermissionPrompt() throws {
+        func claude(_ event: String, _ extra: [String: Any] = [:]) {
+            send(["hook_event_name": event, "session_id": "uuid-2", "cwd": "/work/app"].merging(extra) { $1 }, from: .claude)
+        }
+        claude("UserPromptSubmit", ["prompt": "Tidy up the build scripts"])
+        var task = try XCTUnwrap(hooks.task(for: "uuid-2"))
+        XCTAssertEqual(task.agent, AgentLink(kind: .claude, session: "uuid-2"))
+        XCTAssertEqual(task.status, .working)
+        XCTAssertEqual(task.workspace, "/work/app")
+
+        // Stopped mid-turn on a permission prompt: it needs you now, not at the end of the turn.
+        claude("Notification", ["notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"])
+        task = try XCTUnwrap(hooks.task(for: "uuid-2"))
+        XCTAssertEqual(task.status, .needsAttention)
+        XCTAssertEqual(task.attention, "Claude needs your permission to use Bash")
+
+        // You approved and the tool ran: back to working.
+        claude("PostToolUse", ["tool_name": "Bash"])
+        task = try XCTUnwrap(hooks.task(for: "uuid-2"))
+        XCTAssertEqual(task.status, .working)
+        XCTAssertNil(task.attention)
+        XCTAssertFalse(task.awaitingApproval)
+
+        // Tool calls are otherwise ignored, so the file is not rewritten on every one.
+        let before = try XCTUnwrap(task.updated)
+        hooks.now = { before.addingTimeInterval(60) }
+        claude("PostToolUse", ["tool_name": "Read"])
+        XCTAssertEqual(hooks.task(for: "uuid-2")?.updated, before)
+
+        try SessionLinker(store: store).add(TaskItem(id: "", title: "Tidy the build scripts"), session: "uuid-2")
+        claude("Stop")
+        XCTAssertEqual(hooks.task(for: "uuid-2")?.status, .needsAttention)
+        XCTAssertEqual(hooks.task(for: "uuid-2")?.attention, "Agent finished its turn")
+    }
+
+    func testClaudeIsSentBackOnceToFileAnUnfiledChat() throws {
+        func stop(active: Bool = false) -> [String: Any] {
+            send(["hook_event_name": "Stop", "session_id": "uuid-7", "stop_hook_active": active], from: .claude)
+        }
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-7", "prompt": "Review the telemetry change"], from: .claude)
+
+        let held = stop()
+        XCTAssertEqual(held["decision"] as? String, "block")
+        XCTAssertTrue((held["reason"] as? String)?.contains("dismiss --session uuid-7") ?? false)
+        XCTAssertEqual(hooks.task(for: "uuid-7")?.status, .working, "it is about to carry on")
+
+        // Never twice: not on the second pass, and not on a later turn either.
+        XCTAssertTrue(stop(active: true).isEmpty)
+        XCTAssertEqual(hooks.task(for: "uuid-7")?.status, .needsAttention)
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-7", "prompt": "thanks"], from: .claude)
+        XCTAssertTrue(stop().isEmpty)
+    }
+
+    func testAFiledChatIsNotHeld() throws {
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-8", "prompt": "Fix the build"], from: .claude)
+        try SessionLinker(store: store, defaultKind: .claude).add(TaskItem(id: "", title: "Fix the build"), session: "uuid-8")
+        XCTAssertTrue(send(["hook_event_name": "Stop", "session_id": "uuid-8"], from: .claude).isEmpty)
+        XCTAssertEqual(hooks.task(for: "uuid-8")?.status, .needsAttention)
+    }
+
+    func testDismissTakesAQuestionOffTheBoardForGood() throws {
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-9", "prompt": "What does this flag do?"], from: .claude)
+        XCTAssertEqual(store.loadAll().count, 1)
+        XCTAssertTrue(try SessionLinker(store: store).dismiss(session: "uuid-9"))
+        XCTAssertTrue(store.loadAll().isEmpty)
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-9", "prompt": "And this one?"], from: .claude)
+        XCTAssertTrue(store.loadAll().isEmpty, "later questions in the same chat stay off too")
+
+        // A chat that was filed as real work is not something to dismiss.
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-10", "prompt": "Fix it"], from: .claude)
+        try SessionLinker(store: store).add(TaskItem(id: "", title: "Fix it"), session: "uuid-10")
+        XCTAssertFalse(try SessionLinker(store: store).dismiss(session: "uuid-10"))
+        XCTAssertEqual(store.loadAll().count, 1)
+    }
+
+    func testClaudeIdlePromptCoversAnInterruptedTurn() throws {
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-3", "prompt": "long job"], from: .claude)
+        send(["hook_event_name": "Notification", "session_id": "uuid-3", "notification_type": "auth_success"], from: .claude)
+        XCTAssertEqual(hooks.task(for: "uuid-3")?.status, .working)
+        send(["hook_event_name": "Notification", "session_id": "uuid-3", "notification_type": "idle_prompt"], from: .claude)
+        XCTAssertEqual(hooks.task(for: "uuid-3")?.status, .needsAttention)
+    }
+
+    func testClaudeSubagentEventsDoNotEndTheTurn() throws {
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-4", "prompt": "fan out"], from: .claude)
+        send(["hook_event_name": "Stop", "session_id": "uuid-4", "agent_id": "sub-1"], from: .claude)
+        XCTAssertEqual(hooks.task(for: "uuid-4")?.status, .working)
+    }
+
+    func testClaudeDesktopSessionIDComesFromTheEnvironment() throws {
+        hooks.environment = ["CLAUDE_CODE_HOST_SESSION_ID": "local_abc-123", "CLAUDE_PROJECT_DIR": "/work/project"]
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "inner-uuid", "cwd": "/work/project/sub", "prompt": "go"], from: .claude)
+        let task = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(task.agent, AgentLink(kind: .claude, session: "local_abc-123"))
+        XCTAssertEqual(task.workspace, "/work/project")
+        XCTAssertEqual(task.agentURL?.absoluteString, "claude://claude.ai/epitaxy/local_abc-123")
+    }
+
+    func testFilingKeepsTheAppTheSessionWasSeenIn() throws {
+        send(["hook_event_name": "UserPromptSubmit", "session_id": "uuid-5", "prompt": "write the changelog"], from: .claude)
+        // The default says Cursor, but the stand-in knows this chat is in Claude.
+        let filed = try SessionLinker(store: store, defaultKind: .cursor).add(TaskItem(id: "", title: "Write the changelog"), session: "uuid-5")
+        XCTAssertEqual(filed.agent, AgentLink(kind: .claude, session: "uuid-5"))
+        // With nothing to go on, the default decides.
+        let fresh = try SessionLinker(store: store, defaultKind: .claude).add(TaskItem(id: "", title: "Another"), session: "uuid-6")
+        XCTAssertEqual(fresh.agent?.kind, .claude)
+    }
+
+    func testClaudeInstallerLeavesTheRestOfSettingsAlone() throws {
+        let existing: [String: Any] = [
+            "model": "opus",
+            "permissions": ["allow": ["Bash(git status)"]],
+            "hooks": ["Stop": [["hooks": [["type": "command", "command": "say done"]]]]],
+        ]
+        let once = HookInstaller.merged(existing: existing, kind: .claude, cliPath: "/a/taskboard")
+        let twice = HookInstaller.merged(existing: once, kind: .claude, cliPath: "/b/taskboard")
+        XCTAssertEqual(twice["model"] as? String, "opus")
+        XCTAssertEqual((twice["permissions"] as? [String: [String]])?["allow"], ["Bash(git status)"])
+        XCTAssertNil(twice["version"])
+        XCTAssertTrue(HookInstaller.contains(twice, kind: .claude))
+
+        let hooks = twice["hooks"] as! [String: [[String: Any]]]
+        XCTAssertEqual(hooks["Stop"]!.count, 2, "the user's own Stop hook stays, ours is added once")
+        let ours = (hooks["SessionStart"]![0]["hooks"] as! [[String: Any]])[0]
+        XCTAssertEqual(ours["type"] as? String, "command")
+        XCTAssertEqual(ours["command"] as? String, "\"/b/taskboard\" hook claude 2>/dev/null || true")
+
+        let cleaned = HookInstaller.removed(existing: twice, kind: .claude)
+        XCTAssertEqual(NSDictionary(dictionary: cleaned), NSDictionary(dictionary: existing))
+        // A settings file that had no hooks before has no "hooks" key afterwards.
+        let bare = HookInstaller.removed(existing: HookInstaller.merged(existing: ["model": "opus"], kind: .claude, cliPath: "/a/taskboard"), kind: .claude)
+        XCTAssertEqual(NSDictionary(dictionary: bare), NSDictionary(dictionary: ["model": "opus"]))
+    }
+
+    func testClaudeInstallKeepsACopyOfTheSettingsFile() throws {
+        let file = home.appendingPathComponent("settings.json")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try Data(#"{"model":"opus"}"#.utf8).write(to: file)
+        try HookInstaller.install(kind: .claude, cliPath: "/a/taskboard", file: file)
+        XCTAssertTrue(HookInstaller.isInstalled(kind: .claude, file: file))
+        XCTAssertEqual(try String(contentsOf: HookInstaller.backupFile(for: file), encoding: .utf8), #"{"model":"opus"}"#)
+        try HookInstaller.uninstall(kind: .claude, file: file)
+        XCTAssertFalse(HookInstaller.isInstalled(kind: .claude, file: file))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
 }

@@ -37,6 +37,8 @@ public enum BoardLayout: String, Codable, CaseIterable, Sendable {
 public struct BoardConfig: Codable, Equatable, Sendable {
     public var columns: [ColumnConfig]
     public var automation: ColumnAutomation
+    /// The app your agents run in. Decides which hooks Settings and `doctor` deal with.
+    public var agent: AgentKind
     /// Folder holding the task markdown files. `nil` uses `<home>/tasks`.
     public var tasksDirectory: String?
     public var layout: BoardLayout
@@ -58,6 +60,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
             ColumnConfig(id: "done", name: "Done"),
         ],
         automation: ColumnAutomation(active: "in-progress", review: "in-review", done: "done"),
+        agent: .cursor,
         tasksDirectory: nil,
         layout: .board,
         pollSeconds: 60,
@@ -70,6 +73,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
     public init(
         columns: [ColumnConfig],
         automation: ColumnAutomation,
+        agent: AgentKind,
         tasksDirectory: String?,
         layout: BoardLayout,
         pollSeconds: Int,
@@ -80,6 +84,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
     ) {
         self.columns = columns
         self.automation = automation
+        self.agent = agent
         self.tasksDirectory = tasksDirectory
         self.layout = layout
         self.pollSeconds = pollSeconds
@@ -96,6 +101,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         let decodedColumns = try container.decodeIfPresent([ColumnConfig].self, forKey: .columns) ?? []
         columns = decodedColumns.isEmpty ? fallback.columns : decodedColumns
         automation = try container.decodeIfPresent(ColumnAutomation.self, forKey: .automation) ?? fallback.automation
+        agent = try container.decodeIfPresent(AgentKind.self, forKey: .agent) ?? fallback.agent
         tasksDirectory = try container.decodeIfPresent(String.self, forKey: .tasksDirectory)
         layout = try container.decodeIfPresent(BoardLayout.self, forKey: .layout) ?? fallback.layout
         pollSeconds = max(15, try container.decodeIfPresent(Int.self, forKey: .pollSeconds) ?? fallback.pollSeconds)

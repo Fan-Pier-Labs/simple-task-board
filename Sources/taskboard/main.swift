@@ -12,6 +12,7 @@ USAGE
   taskboard show <id>                     Print one task's markdown file
   taskboard add <title> [options]         Create a task
   taskboard attach <id>                   File the current agent chat under an existing task
+  taskboard dismiss                       Take the current agent chat off the board: it is not work
   taskboard update [<id>] [options]       Change a task
   taskboard status [<id>] <status>        Set the status: idle, working, needs-attention, done
   taskboard remove <id>                   Delete a task file
@@ -19,11 +20,13 @@ USAGE
 
   taskboard doctor                        Test the Cursor, GitHub and Jira connections
   taskboard config                        Show the connection settings
-  taskboard config <setting> <value>      Change one: github-server, jira-site, jira-email
+  taskboard config <setting> <value>      Change one: agent, github-server, jira-site, jira-email
 
-  taskboard hook                          Handle a Cursor hook event (JSON on stdin)
   taskboard install-cursor-hooks          Add the hooks to ~/.cursor/hooks.json
+  taskboard install-claude-hooks          Add the hooks to ~/.claude/settings.json
   taskboard uninstall-cursor-hooks        Remove them again
+  taskboard uninstall-claude-hooks
+  taskboard hook <cursor|claude>          Handle a hook event from that app (JSON on stdin)
 
 OPTIONS (add, update)
   --title <text>       At most \(TaskItem.maxTitleLength) characters
@@ -37,8 +40,8 @@ OPTIONS (add, update)
   --branch <name>      Its branch; the board finds that branch's pull request by itself
   --body <markdown>    Replace the description
   --note <markdown>    Append a paragraph to the description
-  --session <id>       The agent chat this call is about. Defaults to $TASKBOARD_SESSION.
-                       With a session, `update` and `status` need no task id.
+  --session <id>       The agent chat this call is about. `add` and `attach` link the task
+                       to it. With a session, `update` and `status` need no task id.
 """
 
 struct Failure: Error, CustomStringConvertible {
@@ -77,14 +80,26 @@ struct Arguments {
         }
     }
 
+    /// Only an explicit `--session` links a task to a chat. Otherwise adding a note-to-self
+    /// task from inside an agent chat would attach it to that chat.
     var session: String? {
-        let value = options["session"] ?? ProcessInfo.processInfo.environment["TASKBOARD_SESSION"]
-        return value.flatMap { $0.isEmpty ? nil : $0 }
+        options["session"].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// For commands that only need to find the current chat's task, the environment will do.
+    var currentSession: String? {
+        let environment = ProcessInfo.processInfo.environment
+        let desktop = environment["CLAUDE_CODE_HOST_SESSION_ID"].flatMap { $0.hasPrefix("local_") ? $0 : nil }
+        let candidates = [session, environment["TASKBOARD_SESSION"], desktop, environment["CLAUDE_CODE_SESSION_ID"]]
+        return candidates.compactMap { $0 }.first { !$0.isEmpty }
     }
 }
 
 let config = BoardConfig.load()
 let store = TaskStore(config: config)
+/// A chat no task mentions yet is assumed to be in the app this command was run from,
+/// and failing that, the app chosen in Settings.
+let linker = SessionLinker(store: store, defaultKind: AgentKind.detect() ?? config.agent)
 
 func validatedTitle(_ raw: String) throws -> String {
     let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -127,7 +142,7 @@ func targetTask(id: String?, session: String?) throws -> TaskItem {
     guard let session else {
         throw Failure("Give a task id, or pass --session <id> to act on the current agent chat's task.")
     }
-    guard let task = store.loadAll().first(where: { $0.cursorAgent == session }) else {
+    guard let task = store.loadAll().first(where: { $0.agent?.session == session }) else {
         throw Failure("No task is linked to session \(session) yet. Run `taskboard add` or `taskboard attach` first.")
     }
     return task
@@ -176,6 +191,7 @@ func printConfig() {
     print("Settings file:  \(file)")
     print("tasks folder:   \((store.directory.path as NSString).abbreviatingWithTildeInPath)")
     print("columns:        \(config.columns.map(\.name).joined(separator: ", "))")
+    print("agent:          \(config.agent.rawValue)")
     print("github-server:  \(config.githubHostName)")
     print("jira-site:      \(config.jiraBaseURL ?? "(not set)")")
     print("jira-email:     \(config.jiraEmail ?? "(not set)")")
@@ -186,6 +202,7 @@ func describe(_ task: TaskItem) -> String {
     var line = "\(task.id)  [\(task.status.rawValue)]  \(task.title)"
     if let jira = task.jira { line += "  (\(jira))" }
     if task.pr != nil { line += "  (PR)" }
+    if let agent = task.agent { line += "  (\(agent.kind.displayName))" }
     return line
 }
 
@@ -197,7 +214,8 @@ func listTasks(json: Bool) throws {
             object["column"] = task.column
             object["jira"] = task.jira
             object["pr"] = task.pr
-            object["cursor_agent"] = task.cursorAgent
+            object["agent"] = task.agent?.kind.rawValue
+            object["session"] = task.agent?.session
             return object
         }
         let payload = nodes.map { node -> [String: Any] in
@@ -251,7 +269,7 @@ func run(_ rawArguments: [String]) throws {
         guard let rawTitle else { throw Failure("Usage: taskboard add <title> [options]") }
         var draft = TaskItem(id: "", title: try validatedTitle(rawTitle))
         try applyOptions(arguments, to: &draft)
-        let created = try SessionLinker(store: store).add(draft, session: arguments.session)
+        let created = try linker.add(draft, session: arguments.session)
         print("Created \(created.id)")
 
     case "attach":
@@ -259,11 +277,20 @@ func run(_ rawArguments: [String]) throws {
         guard let session = arguments.session else {
             throw Failure("attach needs the agent chat's id: pass --session <id>.")
         }
-        let task = try SessionLinker(store: store).attach(taskID: id, session: session)
+        let task = try linker.attach(taskID: id, session: session)
         print("Attached this chat to \(task.id): \(task.title)")
 
+    case "dismiss":
+        guard let session = arguments.session else {
+            throw Failure("dismiss needs the agent chat's id: pass --session <id>.")
+        }
+        guard try linker.dismiss(session: session) else {
+            throw Failure("This chat is filed under a task, so it stays on the board. Use `taskboard status done` when it is finished.")
+        }
+        print("This chat is off the board.")
+
     case "update", "edit":
-        var task = try targetTask(id: arguments.positionals.first, session: arguments.session)
+        var task = try targetTask(id: arguments.positionals.first, session: arguments.currentSession)
         try applyOptions(arguments, to: &task)
         try store.save(task)
         print("Updated \(task.id)")
@@ -274,8 +301,9 @@ func run(_ rawArguments: [String]) throws {
         guard let rawStatus = positionals.last, (1...2).contains(positionals.count) else {
             throw Failure("Usage: taskboard status [<id>] <idle|working|needs-attention|done> [--reason <text>]")
         }
-        var task = try targetTask(id: positionals.count == 2 ? positionals[0] : nil, session: arguments.session)
+        var task = try targetTask(id: positionals.count == 2 ? positionals[0] : nil, session: arguments.currentSession)
         task.status = try parseStatus(rawStatus)
+        task.awaitingApproval = false
         task.attention = task.status == .needsAttention ? arguments.options["reason"] : nil
         try store.save(task)
         print("\(task.id) is now \(task.status.rawValue)")
@@ -314,11 +342,16 @@ func run(_ rawArguments: [String]) throws {
             return
         }
         guard positionals.count == 2 else {
-            throw Failure("Usage: taskboard config <github-server|jira-site|jira-email> <value>   (\"none\" clears it)")
+            throw Failure("Usage: taskboard config <agent|github-server|jira-site|jira-email> <value>   (\"none\" clears it)")
         }
         var updated = config
         let value = optionalLink(positionals[1])
         switch positionals[0] {
+        case "agent":
+            guard let kind = AgentKind(rawValue: positionals[1].lowercased()) else {
+                throw Failure("The agent app is either cursor or claude.")
+            }
+            updated.agent = kind
         case "github-server":
             let host = GitHub.normalizeHost(value)
             updated.githubHost = host == GitHub.defaultHost ? nil : host
@@ -327,15 +360,17 @@ func run(_ rawArguments: [String]) throws {
         case "jira-email":
             updated.jiraEmail = value
         default:
-            throw Failure("Unknown setting '\(positionals[0])'. Use github-server, jira-site or jira-email.")
+            throw Failure("Unknown setting '\(positionals[0])'. Use agent, github-server, jira-site or jira-email.")
         }
         try updated.save()
         print("Saved \(positionals[0]). Task Board picks it up on its own.")
 
     case "hook":
+        // `taskboard hook` with no app named is what the first Cursor hooks called.
+        let kind = arguments.positionals.first.flatMap { AgentKind(rawValue: $0.lowercased()) } ?? .cursor
         let payload = FileHandle.standardInput.readDataToEndOfFile()
-        let hooks = CursorHooks(store: store, cliPath: CursorInstaller.cliLink.path)
-        let response = hooks.handle(payload: payload)
+        let hooks = AgentHooks(store: store, cliPath: HookInstaller.cliLink.path)
+        let response = hooks.handle(payload: payload, from: kind)
         FileHandle.standardOutput.write(response)
 
         // Diagnosis: `touch ~/.taskboard/hooks.log` and every hook call is recorded there.
@@ -344,29 +379,41 @@ func run(_ rawArguments: [String]) throws {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
             let stamp = ISO8601DateFormatter().string(from: Date())
-            let entry = "\(stamp)\nin:  \(String(decoding: payload, as: UTF8.self))\nout: \(String(decoding: response, as: UTF8.self))\n\n"
+            // One entry is three lines and a blank one, whatever newlines the app sent.
+            let received = String(decoding: payload, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            let entry = "\(stamp) \(kind.rawValue): \(hooks.describe(payload: payload, from: kind))\nin:  \(received)\nout: \(String(decoding: response, as: UTF8.self))\n\n"
             try? handle.write(contentsOf: Data(entry.utf8))
         }
 
-    case "install-cursor-hooks":
-        // Hooks call the CLI through a stable link, so they survive the app being moved.
-        let binary = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0]).resolvingSymlinksInPath()
+    case "install-cursor-hooks", "install-claude-hooks":
+        let kind: AgentKind = command.contains("claude") ? .claude : .cursor
+        let file = HookInstaller.hooksFile(for: kind)
         if arguments.flags.contains("print") {
-            let merged = CursorInstaller.merged(existing: [:], cliPath: CursorInstaller.cliLink.path)
+            let merged = HookInstaller.merged(existing: [:], kind: kind, cliPath: HookInstaller.cliLink.path)
             let data = try JSONSerialization.data(
                 withJSONObject: merged, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             )
             print(String(decoding: data, as: UTF8.self))
             return
         }
-        try CursorInstaller.linkCLI(from: binary)
-        try CursorInstaller.install()
-        print("Installed Cursor hooks in \(CursorInstaller.hooksFile.path)")
-        print("They call \(CursorInstaller.cliLink.path) -> \(binary.path)")
+        // Hooks call the CLI through a stable link, so they survive the app being moved.
+        // When this already is that link, leave it pointing where it points.
+        let invoked = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+        let binary = invoked.resolvingSymlinksInPath()
+        if binary.path != HookInstaller.cliLink.resolvingSymlinksInPath().path {
+            try HookInstaller.linkCLI(from: binary)
+        }
+        try HookInstaller.install(kind: kind)
+        print("Installed \(kind.displayName) hooks in \(file.path)")
+        if kind == .claude, FileManager.default.fileExists(atPath: HookInstaller.backupFile(for: file).path) {
+            print("The file as it was before is kept at \(HookInstaller.backupFile(for: file).path)")
+        }
+        print("They call \(HookInstaller.cliLink.path)")
 
-    case "uninstall-cursor-hooks":
-        try CursorInstaller.uninstall()
-        print("Removed Task Board hooks from \(CursorInstaller.hooksFile.path)")
+    case "uninstall-cursor-hooks", "uninstall-claude-hooks":
+        let kind: AgentKind = command.contains("claude") ? .claude : .cursor
+        try HookInstaller.uninstall(kind: kind)
+        print("Removed Task Board hooks from \(HookInstaller.hooksFile(for: kind).path)")
 
     default:
         throw Failure("Unknown command '\(command)'. Run `taskboard help`.")

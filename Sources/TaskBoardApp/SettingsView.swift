@@ -208,8 +208,9 @@ private struct ColumnSettings: View {
 
 private struct IntegrationSettings: View {
     @ObservedObject var model: BoardModel
-    @State private var hooksInstalled = CursorInstaller.isInstalled()
-    @State private var cursorMessage: String?
+    /// Bumped after installing or removing hooks, so the status line is read again.
+    @State private var hooksChanged = 0
+    @State private var agentMessage: String?
     @State private var githubMessage: String?
     @State private var testingGitHub = false
     @State private var jiraToken = ""
@@ -219,18 +220,23 @@ private struct IntegrationSettings: View {
 
     var body: some View {
         Form {
-            Section("Cursor") {
-                LabeledContent("Agent hooks") {
+            Section("Coding agent") {
+                Picker("Agents run in", selection: model.binding(\.agent)) {
+                    ForEach(AgentKind.allCases, id: \.self) { kind in
+                        Text(kind.displayName).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                LabeledContent("\(agent.displayName) hooks") {
                     HStack {
                         Text(hooksInstalled ? "Installed" : "Not installed").foregroundStyle(.secondary)
                         Button(hooksInstalled ? "Reinstall" : "Install", action: installHooks)
                         if hooksInstalled { Button("Remove", action: removeHooks) }
                     }
                 }
-                Text("Adds four entries to ~/.cursor/hooks.json. Each new agent chat then shows up here on its own, files itself under the right task, and flips between working and waiting as it runs.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if let cursorMessage {
-                    Text(cursorMessage).font(.caption).foregroundStyle(.orange)
+                Text(hooksCaption).font(.caption).foregroundStyle(.secondary)
+                if let agentMessage {
+                    Text(agentMessage).font(.caption).foregroundStyle(.orange)
                 }
             }
 
@@ -277,29 +283,47 @@ private struct IntegrationSettings: View {
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
+    private var agent: AgentKind { model.config.agent }
+
+    private var hooksInstalled: Bool {
+        _ = hooksChanged
+        return HookInstaller.isInstalled(kind: agent)
+    }
+
+    private var hooksCaption: String {
+        let behaviour = "Each new agent chat then shows up here on its own, files itself under the right task, and flips between working and waiting as it runs."
+        switch agent {
+        case .cursor:
+            return "Adds four entries to ~/.cursor/hooks.json. " + behaviour
+        case .claude:
+            return "Adds six entries to ~/.claude/settings.json, keeping a copy of the file as it was. "
+                + behaviour + " Claude asks before it first runs the taskboard command; choose to always allow it."
+        }
+    }
+
     private func installHooks() {
         do {
-            if let bundledCLI { try CursorInstaller.linkCLI(from: bundledCLI) }
-            guard FileManager.default.isExecutableFile(atPath: CursorInstaller.cliLink.path) else {
-                cursorMessage = "The taskboard command is missing from this build, so the hooks would have nothing to run."
+            if let bundledCLI { try HookInstaller.linkCLI(from: bundledCLI) }
+            guard FileManager.default.isExecutableFile(atPath: HookInstaller.cliLink.path) else {
+                agentMessage = "The taskboard command is missing from this build, so the hooks would have nothing to run."
                 return
             }
-            try CursorInstaller.install()
-            cursorMessage = nil
+            try HookInstaller.install(kind: agent)
+            agentMessage = nil
         } catch {
-            cursorMessage = "\(error)"
+            agentMessage = "\(error)"
         }
-        hooksInstalled = CursorInstaller.isInstalled()
+        hooksChanged += 1
     }
 
     private func removeHooks() {
         do {
-            try CursorInstaller.uninstall()
-            cursorMessage = nil
+            try HookInstaller.uninstall(kind: agent)
+            agentMessage = nil
         } catch {
-            cursorMessage = "\(error)"
+            agentMessage = "\(error)"
         }
-        hooksInstalled = CursorInstaller.isInstalled()
+        hooksChanged += 1
     }
 
     private func testGitHub() {

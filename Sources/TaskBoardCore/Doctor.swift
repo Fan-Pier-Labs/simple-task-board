@@ -23,13 +23,14 @@ public struct DoctorCheck: Equatable, Sendable {
     }
 }
 
-/// Checks each connection for real: the task files, the Cursor hooks, GitHub through `gh`, and Jira.
+/// Checks each connection for real: the task files, the agent app's hooks, GitHub through `gh`, and Jira.
 /// Everything it does is read-only.
 public struct Doctor: Sendable {
     public let config: BoardConfig
     public let store: TaskStore
-    public var hooksFile = CursorInstaller.hooksFile
-    public var cliLink = CursorInstaller.cliLink
+    /// `nil` means the usual file for the agent app chosen in Settings.
+    public var hooksFile: URL?
+    public var cliLink = HookInstaller.cliLink
 
     public init(config: BoardConfig, store: TaskStore) {
         self.config = config
@@ -38,7 +39,7 @@ public struct Doctor: Sendable {
 
     public func run() async -> [DoctorCheck] {
         let tasks = store.loadAll()
-        return taskChecks(tasks) + cursorChecks(tasks) + githubChecks(tasks) + (await jiraChecks(tasks))
+        return taskChecks(tasks) + agentChecks(tasks) + githubChecks(tasks) + (await jiraChecks(tasks))
     }
 
     private func display(_ url: URL) -> String {
@@ -58,37 +59,40 @@ public struct Doctor: Sendable {
         return [DoctorCheck("Tasks", .pass, "\(display(store.directory)) holds \(tasks.count) task(s).")]
     }
 
-    // MARK: - Cursor
+    // MARK: - Cursor or Claude
 
-    func cursorChecks(_ tasks: [TaskItem]) -> [DoctorCheck] {
+    func agentChecks(_ tasks: [TaskItem]) -> [DoctorCheck] {
         var checks: [DoctorCheck] = []
-        let area = "Cursor"
+        let kind = config.agent
+        let area = kind.displayName
+        let file = hooksFile ?? HookInstaller.hooksFile(for: kind)
+        let installCommand = "taskboard install-\(kind.rawValue)-hooks"
 
         if FileManager.default.isExecutableFile(atPath: cliLink.path) {
             checks.append(DoctorCheck(area, .pass, "The command is at \(display(cliLink))."))
         } else {
             checks.append(DoctorCheck(
                 area, .failure, "\(display(cliLink)) is missing, so the hooks have nothing to run.",
-                fix: "Launch Task Board once, or run `taskboard install-cursor-hooks`."
+                fix: "Launch Task Board once, or run `\(installCommand)`."
             ))
         }
 
-        if CursorInstaller.isInstalled(hooksFile: hooksFile) {
-            checks.append(DoctorCheck(area, .pass, "The hooks are installed in \(display(hooksFile))."))
+        if HookInstaller.isInstalled(kind: kind, file: file) {
+            checks.append(DoctorCheck(area, .pass, "The hooks are installed in \(display(file))."))
         } else {
             checks.append(DoctorCheck(
-                area, .failure, "The hooks are not installed in \(display(hooksFile)).",
-                fix: "Run `taskboard install-cursor-hooks`."
+                area, .failure, "The hooks are not installed in \(display(file)).",
+                fix: "Run `\(installCommand)`."
             ))
         }
 
-        let linked = tasks.filter { $0.cursorAgent != nil }.count
+        let linked = tasks.filter { $0.agent?.kind == kind }.count
         if linked > 0 {
-            checks.append(DoctorCheck(area, .pass, "\(linked) task(s) are linked to an agent chat, so hooks have fired."))
+            checks.append(DoctorCheck(area, .pass, "\(linked) task(s) are linked to a \(area) chat, so hooks have fired."))
         } else {
             checks.append(DoctorCheck(
-                area, .warning, "No agent chat has reported yet, so the hooks are unproven.",
-                fix: "Start a new agent chat in Cursor, send it a prompt, then run this again."
+                area, .warning, "No \(area) chat has reported yet, so the hooks are unproven.",
+                fix: "Start a new agent chat in \(area), send it a prompt, then run this again."
             ))
         }
         return checks
