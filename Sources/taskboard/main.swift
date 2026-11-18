@@ -17,6 +17,10 @@ USAGE
   taskboard remove <id>                   Delete a task file
   taskboard path                          Print the tasks folder
 
+  taskboard doctor                        Test the Cursor, GitHub and Jira connections
+  taskboard config                        Show the connection settings
+  taskboard config <setting> <value>      Change one: github-server, jira-site, jira-email
+
   taskboard hook                          Handle a Cursor hook event (JSON on stdin)
   taskboard install-cursor-hooks          Add the hooks to ~/.cursor/hooks.json
   taskboard uninstall-cursor-hooks        Remove them again
@@ -29,6 +33,8 @@ OPTIONS (add, update)
   --reason <text>      Why it needs attention
   --jira <KEY>         Link a Jira issue ("none" to unlink)
   --pr <url>           Link a GitHub pull request ("none" to unlink)
+  --workspace <path>   The checkout the work happens in
+  --branch <name>      Its branch; the board finds that branch's pull request by itself
   --body <markdown>    Replace the description
   --note <markdown>    Append a paragraph to the description
   --session <id>       The agent chat this call is about. Defaults to $TASKBOARD_SESSION.
@@ -141,10 +147,39 @@ func applyOptions(_ arguments: Arguments, to task: inout TaskItem) throws {
     if let reason = arguments.options["reason"] { task.attention = optionalLink(reason) }
     if let jira = arguments.options["jira"] { task.jira = optionalLink(jira)?.uppercased() }
     if let pr = arguments.options["pr"] { task.pr = optionalLink(pr) }
+    if let workspace = arguments.options["workspace"] {
+        task.workspace = optionalLink(workspace).map { ($0 as NSString).expandingTildeInPath }
+    }
+    if let branch = arguments.options["branch"] { task.branch = optionalLink(branch) }
     if let body = arguments.options["body"] { task.body = body }
     if let note = arguments.options["note"] {
         task.body = task.body.isEmpty ? note : task.body + "\n\n" + note
     }
+}
+
+/// Runs async work from this synchronous tool and waits for it.
+final class ResultBox<Value>: @unchecked Sendable { var value: Value? }
+
+func blocking<Value>(_ work: @escaping @Sendable () async -> Value) -> Value {
+    let box = ResultBox<Value>()
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        box.value = await work()
+        done.signal()
+    }
+    done.wait()
+    return box.value!
+}
+
+func printConfig() {
+    let file = (BoardPaths.configURL.path as NSString).abbreviatingWithTildeInPath
+    print("Settings file:  \(file)")
+    print("tasks folder:   \((store.directory.path as NSString).abbreviatingWithTildeInPath)")
+    print("columns:        \(config.columns.map(\.name).joined(separator: ", "))")
+    print("github-server:  \(config.githubHostName)")
+    print("jira-site:      \(config.jiraBaseURL ?? "(not set)")")
+    print("jira-email:     \(config.jiraEmail ?? "(not set)")")
+    print("jira token:     \(JiraCredentials.hasStoredToken ? "saved in the Keychain" : "not saved")")
 }
 
 func describe(_ task: TaskItem) -> String {
@@ -253,6 +288,49 @@ func run(_ rawArguments: [String]) throws {
         }
         try store.delete(id: id)
         print("Removed \(id)")
+
+    case "doctor":
+        let doctor = Doctor(config: config, store: store)
+        let checks = blocking { await doctor.run() }
+        var area = ""
+        for check in checks {
+            if check.area != area {
+                area = check.area
+                print("\n\(area)")
+            }
+            let mark = ["pass": "✓", "warning": "!", "failure": "✗"][check.outcome.rawValue] ?? "?"
+            print("  \(mark) \(check.message)")
+            if let fix = check.fix { print("      → \(fix)") }
+        }
+        let failures = checks.filter { $0.outcome == .failure }.count
+        let warnings = checks.filter { $0.outcome == .warning }.count
+        print("\n\(checks.count - failures - warnings) passed, \(warnings) unproven, \(failures) failed")
+        if failures > 0 { exit(1) }
+
+    case "config":
+        let positionals = arguments.positionals
+        if positionals.isEmpty {
+            printConfig()
+            return
+        }
+        guard positionals.count == 2 else {
+            throw Failure("Usage: taskboard config <github-server|jira-site|jira-email> <value>   (\"none\" clears it)")
+        }
+        var updated = config
+        let value = optionalLink(positionals[1])
+        switch positionals[0] {
+        case "github-server":
+            let host = GitHub.normalizeHost(value)
+            updated.githubHost = host == GitHub.defaultHost ? nil : host
+        case "jira-site":
+            updated.jiraBaseURL = value
+        case "jira-email":
+            updated.jiraEmail = value
+        default:
+            throw Failure("Unknown setting '\(positionals[0])'. Use github-server, jira-site or jira-email.")
+        }
+        try updated.save()
+        print("Saved \(positionals[0]). Task Board picks it up on its own.")
 
     case "hook":
         let payload = FileHandle.standardInput.readDataToEndOfFile()

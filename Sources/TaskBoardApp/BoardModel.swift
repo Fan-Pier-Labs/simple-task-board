@@ -24,6 +24,7 @@ final class BoardModel: ObservableObject {
 
     private var tasks: [TaskItem] = []
     private var watcher: FileWatcher?
+    private var configWatcher: FileWatcher?
     private var timer: Timer?
     private var remoteKeys = Set<String>()
 
@@ -43,6 +44,13 @@ final class BoardModel: ObservableObject {
         restartWatcher()
         restartTimer()
         Task { await syncRemote() }
+
+        // Settings changed from outside the app (`taskboard config …`) take effect straight away.
+        let configWatcher = FileWatcher(directory: BoardPaths.home) { [weak self] in
+            Task { @MainActor in self?.adoptConfigFromDisk() }
+        }
+        configWatcher.start()
+        self.configWatcher = configWatcher
     }
 
     private func restartWatcher() {
@@ -101,11 +109,28 @@ final class BoardModel: ObservableObject {
         var updated = config
         mutate(&updated)
         guard updated != config else { return }
+        try? updated.save()
+        apply(updated)
+    }
+
+    /// A missing or half-written file is ignored, so the board never falls back to defaults by accident.
+    private func adoptConfigFromDisk() {
+        guard let onDisk = BoardConfig.loadIfValid(), onDisk != config else { return }
+        apply(onDisk)
+    }
+
+    private func apply(_ updated: BoardConfig) {
         let directoryChanged = BoardPaths.tasksDirectory(for: updated) != tasksDirectory
         let pollChanged = updated.pollSeconds != config.pollSeconds
+        let connectionsChanged = updated.githubEnabled != config.githubEnabled
+            || updated.githubHost != config.githubHost
+            || updated.jiraBaseURL != config.jiraBaseURL
+            || updated.jiraEmail != config.jiraEmail
         config = updated
-        try? updated.save()
 
+        if connectionsChanged, timer != nil {
+            Task { await syncRemote() }
+        }
         if directoryChanged {
             try? FileManager.default.createDirectory(at: tasksDirectory, withIntermediateDirectories: true)
             reload()
@@ -204,8 +229,15 @@ enum RemoteSync {
                     // Keep the last known state through a failed fetch rather than blanking the icon.
                     result.remote.pullRequests[url] = info ?? known.pullRequests[url]
                 }
-                if !pending.isEmpty, fetched.allSatisfy({ $0 == nil }) {
-                    result.notes.append("Could not read pull requests. Check `gh auth status`.")
+                // Name the server when every read against it fails: that is nearly always a sign-in problem.
+                var readsByHost: [String: (failed: Int, total: Int)] = [:]
+                for (url, info) in zip(pending, fetched) {
+                    let host = GitHub.host(ofPullRequest: url) ?? config.githubHostName
+                    readsByHost[host, default: (0, 0)].total += 1
+                    if info == nil { readsByHost[host, default: (0, 0)].failed += 1 }
+                }
+                for (host, reads) in readsByHost.sorted(by: { $0.key < $1.key }) where reads.failed == reads.total {
+                    result.notes.append("Could not read pull requests on \(host). Check `gh auth status --hostname \(host)`.")
                 }
             }
         }

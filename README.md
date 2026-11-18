@@ -50,6 +50,10 @@ To try it with sample data without installing anything:
 TASKBOARD_HOME=examples/demo swift run TaskBoardApp --show-board
 ```
 
+Setting it up for real means connecting Cursor, GitHub and Jira and checking each one. Those steps
+are written out for an AI agent to follow with you in
+[docs/work-computer-setup.md](docs/work-computer-setup.md).
+
 ## How tasks are stored
 
 One markdown file per task or subtask, in `~/.taskboard/tasks` (changeable in Settings). The front
@@ -104,6 +108,22 @@ taskboard list
 
 Run `taskboard help` for everything else.
 
+`taskboard doctor` tests each connection for real and says what to fix:
+
+```text
+Cursor
+  ✓ The hooks are installed in ~/.cursor/hooks.json.
+  ! No agent chat has reported yet, so the hooks are unproven.
+      → Start a new agent chat in Cursor, send it a prompt, then run this again.
+
+GitHub
+  ✓ Signed in to github.example.com as you.
+  ✓ Read https://github.example.com/team/app/pull/7: Open · checks passing.
+```
+
+`taskboard config` shows the connection settings, and `taskboard config github-server <host>`,
+`jira-site <url>` and `jira-email <email>` change them. The running app picks changes up at once.
+
 ## Cursor
 
 In Settings → Integrations, click **Install** under Cursor (or run
@@ -125,11 +145,19 @@ own.
 
 Chats in Ask mode are left off the board.
 
+To see exactly what Cursor sends, run `touch ~/.taskboard/hooks.log`. Every hook call is then
+recorded there, prompts included, until you delete the file.
+
 ## GitHub
 
 Pull request and CI status come from the [GitHub CLI](https://cli.github.com), so the app never
 handles a GitHub token. Install `gh` and run `gh auth login`. When a task has a `workspace` and
 `branch` but no `pr`, the app looks for that branch's pull request and writes the link into the task.
+
+For GitHub Enterprise, sign the CLI in to your server with
+`gh auth login --hostname github.example.com`, and enter the server under Settings → Integrations →
+GitHub. **Test Connection** there shows which account the CLI is using on it. Pull requests on
+different servers can sit on the same board; each is read from the server in its URL.
 
 ## Jira
 

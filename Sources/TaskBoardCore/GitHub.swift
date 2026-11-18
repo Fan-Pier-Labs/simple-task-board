@@ -65,8 +65,48 @@ public struct PullRequestInfo: Equatable, Sendable, Codable {
 }
 
 /// Read-only GitHub access through the `gh` CLI, so the app never handles a GitHub token itself.
+///
+/// GitHub Enterprise needs no special handling when reading a pull request: `gh` takes the server
+/// from the pull request's URL, or from the workspace's git remote, and uses whichever account it
+/// is signed in to there (`gh auth login --hostname <server>`).
 public enum GitHub {
     public static var cliPath: String? { Shell.find("gh") }
+
+    public static let defaultHost = "github.com"
+
+    /// Accepts `github.example.com`, `https://github.example.com/some/path`, or nothing (github.com).
+    public static func normalizeHost(_ raw: String?) -> String {
+        var text = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let scheme = text.range(of: "://") { text = String(text[scheme.upperBound...]) }
+        if let slash = text.firstIndex(of: "/") { text = String(text[..<slash]) }
+        return text.isEmpty ? defaultHost : text
+    }
+
+    public static func host(ofPullRequest url: String) -> String? {
+        URL(string: url)?.host?.lowercased()
+    }
+
+    public static func signInCommand(host: String) -> String {
+        "gh auth login --hostname \(host)"
+    }
+
+    public enum Connection: Equatable {
+        case connected(login: String)
+        case cliMissing
+        /// `detail` is what `gh` said, e.g. that it has no account for that server.
+        case failed(detail: String)
+    }
+
+    /// Asks the server who `gh` is signed in as. A real round trip, so it also proves the server is reachable.
+    public static func currentUser(host: String) -> Connection {
+        guard let gh = cliPath,
+              let result = Shell.run(gh, ["api", "--hostname", host, "user", "--jq", ".login"])
+        else { return .cliMissing }
+        let login = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.succeeded, !login.isEmpty { return .connected(login: login) }
+        let firstLine = result.stderr.split(separator: "\n").first.map(String.init) ?? "gh exited with status \(result.status)"
+        return .failed(detail: firstLine)
+    }
 
     static let viewFields = "number,title,url,state,isDraft,reviewDecision,statusCheckRollup"
 

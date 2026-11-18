@@ -23,7 +23,7 @@ struct SettingsView: View {
                 .tabItem { Label("Integrations", systemImage: "link") }
                 .tag(SettingsTab.integrations)
         }
-        .frame(width: 540, height: 520)
+        .frame(width: 540, height: 640)
     }
 }
 
@@ -210,6 +210,8 @@ private struct IntegrationSettings: View {
     @ObservedObject var model: BoardModel
     @State private var hooksInstalled = CursorInstaller.isInstalled()
     @State private var cursorMessage: String?
+    @State private var githubMessage: String?
+    @State private var testingGitHub = false
     @State private var jiraToken = ""
     @State private var hasJiraToken = JiraCredentials.hasStoredToken
     @State private var jiraMessage: String?
@@ -234,10 +236,20 @@ private struct IntegrationSettings: View {
 
             Section("GitHub") {
                 Toggle("Show pull request and CI status", isOn: model.binding(\.githubEnabled))
+                TextField("Server", text: model.textBinding(\.githubHost), prompt: Text("github.com"))
                 LabeledContent("GitHub CLI") {
-                    Text(GitHub.cliPath ?? "Not found. Install gh, then run `gh auth login`.")
+                    Text(GitHub.cliPath ?? "Not found. Install gh first.")
                         .foregroundStyle(.secondary)
                 }
+                HStack {
+                    Button("Test Connection", action: testGitHub).disabled(testingGitHub)
+                    if testingGitHub { ProgressView().controlSize(.small) }
+                }
+                if let githubMessage {
+                    Text(githubMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Text("For GitHub Enterprise, enter your server's address, such as github.example.com. Sign-in is handled by the GitHub CLI.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Jira (read-only)") {
@@ -288,6 +300,24 @@ private struct IntegrationSettings: View {
             cursorMessage = "\(error)"
         }
         hooksInstalled = CursorInstaller.isInstalled()
+    }
+
+    private func testGitHub() {
+        let host = model.config.githubHostName
+        testingGitHub = true
+        githubMessage = nil
+        Task {
+            let connection = await Task.detached { GitHub.currentUser(host: host) }.value
+            switch connection {
+            case .connected(let login):
+                githubMessage = "Connected to \(host) as \(login)."
+            case .cliMissing:
+                githubMessage = "The GitHub CLI (gh) is not installed."
+            case .failed(let detail):
+                githubMessage = "Could not connect to \(host): \(detail)\nTo sign in, run: \(GitHub.signInCommand(host: host))"
+            }
+            testingGitHub = false
+        }
     }
 
     private func saveToken() {

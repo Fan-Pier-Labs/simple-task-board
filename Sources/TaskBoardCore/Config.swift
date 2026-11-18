@@ -43,6 +43,8 @@ public struct BoardConfig: Codable, Equatable, Sendable {
     /// Seconds between GitHub and Jira refreshes.
     public var pollSeconds: Int
     public var githubEnabled: Bool
+    /// The GitHub server, for GitHub Enterprise: e.g. `github.example.com`. `nil` means github.com.
+    public var githubHost: String?
     /// e.g. `https://example.atlassian.net`
     public var jiraBaseURL: String?
     /// Account email for Jira Cloud. Leave empty to send the token as a Bearer token (Data Center).
@@ -60,6 +62,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         layout: .board,
         pollSeconds: 60,
         githubEnabled: true,
+        githubHost: nil,
         jiraBaseURL: nil,
         jiraEmail: nil
     )
@@ -71,6 +74,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         layout: BoardLayout,
         pollSeconds: Int,
         githubEnabled: Bool,
+        githubHost: String?,
         jiraBaseURL: String?,
         jiraEmail: String?
     ) {
@@ -80,6 +84,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         self.layout = layout
         self.pollSeconds = pollSeconds
         self.githubEnabled = githubEnabled
+        self.githubHost = githubHost
         self.jiraBaseURL = jiraBaseURL
         self.jiraEmail = jiraEmail
     }
@@ -95,6 +100,7 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         layout = try container.decodeIfPresent(BoardLayout.self, forKey: .layout) ?? fallback.layout
         pollSeconds = max(15, try container.decodeIfPresent(Int.self, forKey: .pollSeconds) ?? fallback.pollSeconds)
         githubEnabled = try container.decodeIfPresent(Bool.self, forKey: .githubEnabled) ?? fallback.githubEnabled
+        githubHost = try container.decodeIfPresent(String.self, forKey: .githubHost)
         jiraBaseURL = try container.decodeIfPresent(String.self, forKey: .jiraBaseURL)
         jiraEmail = try container.decodeIfPresent(String.self, forKey: .jiraEmail)
     }
@@ -115,10 +121,13 @@ public struct BoardConfig: Codable, Equatable, Sendable {
     // MARK: - Storage
 
     public static func load(from url: URL = BoardPaths.configURL) -> BoardConfig {
-        guard let data = try? Data(contentsOf: url),
-              let config = try? JSONDecoder().decode(BoardConfig.self, from: data)
-        else { return .default }
-        return config
+        loadIfValid(from: url) ?? .default
+    }
+
+    /// `nil` when the file is missing or cannot be parsed.
+    public static func loadIfValid(from url: URL = BoardPaths.configURL) -> BoardConfig? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(BoardConfig.self, from: data)
     }
 
     public func save(to url: URL = BoardPaths.configURL) throws {
@@ -128,6 +137,9 @@ public struct BoardConfig: Codable, Equatable, Sendable {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
     }
+
+    /// The host `gh` should talk to: the configured server, or github.com.
+    public var githubHostName: String { GitHub.normalizeHost(githubHost) }
 
     public var jiraBrowseBase: URL? {
         guard let raw = jiraBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }

@@ -225,6 +225,41 @@ final class GitHubAndJiraTests: XCTestCase {
         XCTAssertNil(parse("not json"))
     }
 
+    func testGitHubServerAcceptsHostsAndURLs() throws {
+        XCTAssertEqual(GitHub.normalizeHost(nil), "github.com")
+        XCTAssertEqual(GitHub.normalizeHost("  "), "github.com")
+        XCTAssertEqual(GitHub.normalizeHost("github.example.com"), "github.example.com")
+        XCTAssertEqual(GitHub.normalizeHost("https://GitHub.Example.com/org/repo"), "github.example.com")
+        XCTAssertEqual(GitHub.host(ofPullRequest: "https://github.example.com/org/repo/pull/7"), "github.example.com")
+
+        let config = try JSONDecoder().decode(BoardConfig.self, from: Data(#"{"githubHost":"https://github.example.com/"}"#.utf8))
+        XCTAssertEqual(config.githubHostName, "github.example.com")
+        XCTAssertEqual(BoardConfig.default.githubHostName, "github.com")
+    }
+
+    func testDoctorReportsWhatIsMissingWithoutTouchingTheNetwork() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("taskboard-doctor-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = TaskStore(directory: home.appendingPathComponent("tasks"))
+        var config = BoardConfig.default
+        config.githubEnabled = false
+        var doctor = Doctor(config: config, store: store)
+        doctor.hooksFile = home.appendingPathComponent("hooks.json")
+        doctor.cliLink = home.appendingPathComponent("bin/taskboard")
+
+        var checks = await doctor.run()
+        XCTAssertEqual(checks.first { $0.area == "Tasks" }?.outcome, .failure)
+        XCTAssertEqual(checks.filter { $0.area == "Cursor" }.map(\.outcome), [.failure, .failure, .warning])
+        XCTAssertEqual(checks.first { $0.area == "GitHub" }?.outcome, .warning)
+        XCTAssertEqual(checks.first { $0.area == "Jira" }?.outcome, .warning)
+
+        try store.create(TaskItem(id: "", title: "Has an agent", cursorAgent: "chat-1"))
+        try CursorInstaller.install(cliPath: doctor.cliLink.path, hooksFile: doctor.hooksFile)
+        checks = await doctor.run()
+        XCTAssertEqual(checks.first { $0.area == "Tasks" }?.outcome, .pass)
+        XCTAssertEqual(checks.filter { $0.area == "Cursor" }.map(\.outcome), [.failure, .pass, .pass])
+    }
+
     func testParsesJiraIssue() {
         let json = """
         {"key": "AUTH-101", "fields": {"summary": "Revamp auth",

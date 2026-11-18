@@ -13,7 +13,7 @@ public enum TaskStoreError: Error, CustomStringConvertible {
 }
 
 /// Reads and writes the folder of task markdown files. One file per task or subtask.
-public struct TaskStore {
+public struct TaskStore: Sendable {
     public let directory: URL
 
     public init(directory: URL) {
