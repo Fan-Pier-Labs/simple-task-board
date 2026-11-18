@@ -1,0 +1,10 @@
+.build/
+build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+.DS_Store
+.claude/worktrees/
+examples/demo/bin/
+examples/demo/sessions/

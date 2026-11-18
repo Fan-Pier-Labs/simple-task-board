@@ -1,0 +1,18 @@
+{
+  "pullRequests": {
+    "https://github.com/example/shop/pull/231": {"url": "https://github.com/example/shop/pull/231", "number": 231, "state": "open", "checks": "pending", "failingChecks": []},
+    "https://github.com/example/shop/pull/228": {"url": "https://github.com/example/shop/pull/228", "number": 228, "state": "open", "checks": "failing", "failingChecks": ["unit-tests"]},
+    "https://github.com/example/shop/pull/219": {"url": "https://github.com/example/shop/pull/219", "number": 219, "state": "merged", "checks": "passing", "failingChecks": []},
+    "https://github.com/example/web/pull/1042": {"url": "https://github.com/example/web/pull/1042", "number": 1042, "state": "open", "checks": "passing", "failingChecks": [], "reviewDecision": "APPROVED"},
+    "https://github.com/example/web/pull/1011": {"url": "https://github.com/example/web/pull/1011", "number": 1011, "state": "merged", "checks": "passing", "failingChecks": []}
+  },
+  "jiraIssues": {
+    "SHOP-412": {"key": "SHOP-412", "summary": "Revamp checkout flow", "statusName": "In Progress", "category": "inProgress"},
+    "SHOP-431": {"key": "SHOP-431", "summary": "Cart API v2", "statusName": "In Progress", "category": "inProgress"},
+    "SHOP-420": {"key": "SHOP-420", "summary": "Apple Pay", "statusName": "Done", "category": "done"},
+    "SRCH-77": {"key": "SRCH-77", "summary": "Slow search", "statusName": "In Progress", "category": "inProgress"},
+    "WEB-88": {"key": "WEB-88", "summary": "Settings dark mode", "statusName": "In Review", "category": "inProgress"},
+    "OPS-17": {"key": "OPS-17", "summary": "Rotate keys", "statusName": "To Do", "category": "todo"},
+    "WEB-61": {"key": "WEB-61", "summary": "Usage dashboard", "statusName": "Done", "category": "done"}
+  }
+}

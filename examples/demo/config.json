@@ -1,0 +1,29 @@
+{
+  "automation" : {
+    "active" : "in-progress",
+    "done" : "done",
+    "review" : "in-review"
+  },
+  "columns" : [
+    {
+      "id" : "backlog",
+      "name" : "Backlog"
+    },
+    {
+      "id" : "in-progress",
+      "name" : "In Progress"
+    },
+    {
+      "id" : "in-review",
+      "name" : "In Review"
+    },
+    {
+      "id" : "done",
+      "name" : "Done"
+    }
+  ],
+  "githubEnabled" : false,
+  "jiraBaseURL" : "https://example.atlassian.net",
+  "layout" : "board",
+  "pollSeconds" : 60
+}
